@@ -957,7 +957,13 @@ def print_system_report() -> None:
 # Tiny manual demo
 # -----------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main() -> None:
+    """Print diagnostics and mouse coordinates until interrupted."""
+
     print_system_report()
     print("Move your mouse around. Press Ctrl+C to stop coordinate printing.")
     print_mouse_position()
+
+
+if __name__ == "__main__":
+    main()

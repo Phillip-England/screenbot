@@ -30,13 +30,11 @@ uv init screenbot-demo
 cd screenbot-demo
 ```
 
-Add dependencies:
+Install ScreenBot:
 
 ```bash
-uv add pyautogui opencv-python pillow numpy pyperclip
+uv add screenbot
 ```
-
-Copy `screenbot.py` into your project folder.
 
 Test it:
 
@@ -47,7 +45,7 @@ uv run python -c "from screenbot import screen_size, mouse_position; print(scree
 Run the built-in coordinate printer:
 
 ```bash
-uv run python screenbot.py
+uv run screenbot
 ```
 
 Press `Ctrl+C` to stop it.
