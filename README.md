@@ -9,7 +9,7 @@ template matching without an OpenCV installation.
 Add ScreenBot as a library dependency from within your Go module:
 
 ```bash
-go get github.com/Phillip-England/screenbot@latest
+go get github.com/phillip-england/screenbot@latest
 ```
 
 Then import it as `github.com/Phillip-England/screenbot`. Libraries are added
@@ -18,7 +18,7 @@ with `go get`; `go install` only installs executable `main` packages.
 To install the optional CLI instead:
 
 ```bash
-go install github.com/Phillip-England/screenbot/cmd/screenbot@latest
+go install github.com/phillip-england/screenbot/cmd/screenbot@latest
 ```
 
 Or build this checkout:
