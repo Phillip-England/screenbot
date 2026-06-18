@@ -1,228 +1,567 @@
-# ScreenBot
+# screenbot
 
-ScreenBot is a Go library and CLI for screen automation. It provides mouse and
-keyboard control, screenshots, color scanning, saved coordinates, and pure-Go
-template matching without an OpenCV installation.
+`screenbot` is a small Python screen automation helper built on top of [PyAutoGUI](https://pyautogui.readthedocs.io/) and OpenCV template matching.
+
+It is designed for scripts where you want to:
+
+- click exact screen coordinates
+- save important points by name
+- define rectangular screen regions
+- screenshot the screen or a region
+- locate an image on screen
+- wait for an image to appear
+- click the center of a matched image
+- add small click variation with `jitter`
+
+The API is intentionally Pythonic: use keyword arguments instead of Go-style options structs.
+
+```python
+from screenbot import ScreenBot
+
+bot = ScreenBot()
+bot.click_image("chrome-logo.png", confidence=0.70, timeout=10, jitter=4)
+```
+
+---
 
 ## Install
 
-Add ScreenBot as a library dependency from within your Go module:
+### Using `pip`
 
 ```bash
-go get github.com/phillip-england/screenbot@latest
+pip install pyautogui pillow opencv-python numpy
 ```
 
-Then import it as `github.com/Phillip-England/screenbot`. Libraries are added
-with `go get`; `go install` only installs executable `main` packages.
+Then copy `screenbot.py` into your project.
 
-To install the optional CLI instead:
+### Using `uv`
 
 ```bash
-go install github.com/phillip-england/screenbot/cmd/screenbot@latest
+uv add pyautogui pillow opencv-python numpy
 ```
 
-Or build this checkout:
+Then copy `screenbot.py` into your project.
 
-```bash
-make install
+---
+
+## macOS permissions
+
+On macOS, screen automation usually requires permissions before it works correctly.
+
+Open:
+
+```text
+System Settings → Privacy & Security
 ```
 
-On macOS, grant Accessibility permission for input control and Screen Recording
-permission for screenshots. Linux builds require the X11 development libraries
-used by RobotGo. Windows builds require a working C compiler because RobotGo
-uses CGO for native input.
+Then allow your terminal, IDE, or Python executable in:
 
-## CLI
+- **Accessibility** — required for moving/clicking the mouse
+- **Screen Recording** — required for screenshots and image matching
 
-```bash
-screenbot pos
-screenbot pos --json
-screenbot pos --watch --interval 250ms
-screenbot color
-screenbot color -50
-screenbot color --x 100 --y 200 --json
-screenbot size
-screenbot screenshot desktop.png
-screenbot screenshot --square 200 selection.png
-screenbot report
-screenbot help
+After changing permissions, restart your terminal or IDE.
+
+---
+
+## Quick start
+
+```python
+from screenbot import ScreenBot
+
+bot = ScreenBot()
+
+print("Screen size:", bot.size)
+
+# Click an exact point.
+bot.click((500, 300))
+
+# Click with a small random variation around the target.
+bot.click((500, 300), jitter=5)
+
+# Find and click an image on screen.
+bot.click_image("assets/chrome-logo.png", confidence=0.75)
 ```
 
-`color` prints the RGB and hexadecimal color at the selected point. A square
-size lists every unique color, ordered by frequency. Negative square sizes are
-accepted as shorthand for compatibility with the original CLI.
+---
 
-## Library
+## Functional style
 
-```go
-package main
+You do not have to create a `ScreenBot` instance. You can import functions directly.
 
-import (
-    "log"
-    "time"
+```python
+import screenbot
 
-    "github.com/Phillip-England/screenbot"
+screenbot.click((100, 200))
+
+match = screenbot.locate("assets/save-button.png", confidence=0.85)
+if match:
+    print(match.center)
+    screenbot.click(match.center)
+```
+
+---
+
+## Object style
+
+Use `ScreenBot` when you want shared defaults.
+
+```python
+from screenbot import ScreenBot
+
+bot = ScreenBot(
+    confidence=0.85,
+    timeout=8,
+    interval=0.25,
+    jitter=3,
+    coordinate_file="coords.json",
 )
 
-func main() {
-    point, err := screenbot.MousePosition()
-    if err != nil {
-        log.Fatal(err)
-    }
+bot.click_image("assets/login-button.png")
+bot.click_image("assets/submit-button.png", confidence=0.90)
+```
 
-    _, err = screenbot.Click(point.Offset(20, 20), screenbot.ClickOptions{
-        MoveOptions: screenbot.MoveOptions{Duration: 200 * time.Millisecond},
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
+Defaults can still be overridden per call.
+
+```python
+bot.click_image("assets/icon.png", confidence=0.70, timeout=15, jitter=8)
+```
+
+---
+
+## Points
+
+A point is just an `x, y` screen coordinate.
+
+```python
+from screenbot import Point
+
+p = Point(400, 250)
+
+bot.click(p)
+bot.click((400, 250))
+bot.click(p.offset(dx=10, dy=-5))
+```
+
+---
+
+## Boxes / regions
+
+A `Box` is defined as:
+
+```python
+Box(x, y, width, height)
+```
+
+Example:
+
+```python
+from screenbot import Box
+
+search_area = Box(0, 0, 800, 600)
+
+match = bot.locate("assets/search-icon.png", region=search_area)
+```
+
+You can also click inside a box.
+
+```python
+button_area = Box(100, 200, 250, 80)
+
+# Clicks a random point inside the box.
+bot.click_box(button_area)
+
+# Avoid the edges by 10 pixels.
+bot.click_box(button_area, padding=10)
+```
+
+Create a box from left/top/right/bottom coordinates:
+
+```python
+box = Box.from_xyxy(left=100, top=200, right=350, bottom=280)
+```
+
+---
+
+## Screenshots
+
+Take a full screenshot:
+
+```python
+img = bot.screenshot()
+img.save("screen.png")
+```
+
+Save a screenshot directly:
+
+```python
+bot.save_screenshot("screenshots/full.png")
+```
+
+Screenshot a region:
+
+```python
+from screenbot import Box
+
+bot.save_screenshot("screenshots/top-left.png", region=Box(0, 0, 500, 400))
+```
+
+---
+
+## Capture an image template
+
+A common workflow is:
+
+1. Screenshot a UI element.
+2. Save it as a template image.
+3. Later, locate that image on screen.
+
+```python
+from screenbot import Box
+
+bot.capture_template("assets/save-button.png", Box(440, 720, 120, 40))
+bot.click_image("assets/save-button.png", confidence=0.85)
+```
+
+---
+
+## Locate an image
+
+```python
+match = bot.locate("assets/chrome-logo.png", confidence=0.80)
+
+if match:
+    print("Found at:", match.box)
+    print("Center:", match.center)
+    print("Score:", match.confidence)
+```
+
+`locate()` returns `None` if the image is not found.
+
+Raise an error instead:
+
+```python
+match = bot.locate("assets/chrome-logo.png", confidence=0.80, required=True)
+```
+
+---
+
+## Wait for an image
+
+Use `wait_for()` when the UI needs time to load.
+
+```python
+match = bot.wait_for("assets/dashboard.png", timeout=15, confidence=0.80)
+print(match.center)
+```
+
+By default, `wait_for()` raises `ImageNotFound` if the timeout expires.
+
+Return `None` instead:
+
+```python
+match = bot.wait_for("assets/dashboard.png", timeout=15, required=False)
+
+if match is None:
+    print("Dashboard never appeared")
+```
+
+---
+
+## Click an image
+
+```python
+bot.click_image("assets/login-button.png", confidence=0.85)
+```
+
+Wait up to 10 seconds, then click:
+
+```python
+bot.click_image("assets/login-button.png", confidence=0.85, timeout=10)
+```
+
+Move slowly before clicking:
+
+```python
+bot.click_image("assets/login-button.png", duration=0.25)
+```
+
+Right-click an image:
+
+```python
+bot.click_image("assets/file.png", button="right")
+```
+
+Double-click an image:
+
+```python
+bot.click_image("assets/app-icon.png", clicks=2, interval=0.1)
+```
+
+Move to the image without clicking:
+
+```python
+bot.click_image("assets/menu.png", move_only=True)
+```
+
+Preview an image click without touching the mouse:
+
+```python
+match = bot.click_image("assets/menu.png", dry_run=True)
+print("Would click near:", match.center if match else None)
+```
+
+---
+
+## Click variation with `jitter`
+
+`jitter` randomly adjusts the final click inside a circular radius.
+
+```python
+bot.click((500, 300), jitter=5)
+```
+
+For image clicks:
+
+```python
+bot.click_image("assets/button.png", jitter=4)
+```
+
+This is useful when the exact center pixel is not ideal, or when you want a small amount of natural variation in a UI test.
+
+---
+
+## Save and reuse coordinates
+
+```python
+bot.save_point("login_button", (640, 420))
+bot.click_saved("login_button")
+```
+
+Use a custom coordinate file:
+
+```python
+bot = ScreenBot(coordinate_file="my-coords.json")
+
+bot.save_point("search_box", (300, 180))
+bot.click_saved("search_box")
+```
+
+The coordinate file is plain JSON.
+
+```json
+{
+  "login_button": [640, 420],
+  "search_box": [300, 180]
 }
 ```
 
-### Mouse Movement
+---
 
-The zero-value options jump immediately, while the convenience functions make
-the intended movement style explicit:
+## Locate multiple copies of the same image
 
-```go
-screenbot.MoveInstant(screenbot.Point{X: 100, Y: 200})
-screenbot.MoveLinear(screenbot.Point{X: 500, Y: 300}, 400*time.Millisecond)
-screenbot.MoveHuman(screenbot.Point{X: 800, Y: 450}, 700*time.Millisecond)
+```python
+matches = bot.locate_all("assets/star-icon.png", confidence=0.82, limit=5)
+
+for match in matches:
+    print(match.center, match.confidence)
 ```
 
-Start with `HumanMoveOptions` when the path needs controlled imperfections:
+---
 
-```go
-move := screenbot.HumanMoveOptions(900 * time.Millisecond)
-move.Detours = 1
-move.DetourRadius = 45
-move.OvershootDistance = 12
-move.JitterRadius = 3
-move.PauseChance = 0.12
-move.PauseMin = 20 * time.Millisecond
-move.PauseMax = 90 * time.Millisecond
+## Retina / DPI scaling
 
-_, err := screenbot.MoveTo(screenbot.Point{X: 800, Y: 450}, move)
-```
+Some macOS Retina displays screenshot at a different pixel scale than the logical mouse coordinate system. `screenbot` tries to map screenshot pixels back to PyAutoGUI coordinates automatically.
 
-`CurveRadius` controls the bend, `Steps` controls path smoothness, and
-`Duration` covers movement time; random pauses are additional. The same
-options can be embedded in `ClickOptions` for human-style move-and-click flows.
+If image matching seems offset:
 
-### Percentage-Based Actions
+1. Make sure your screenshot template was captured on the same display.
+2. Try limiting the search with `region=Box(...)`.
+3. Try template scales.
 
-`RunWeightedAction` chooses and runs exactly one action. The percentages must
-total 100:
-
-```go
-chosen, err := screenbot.RunWeightedAction(
-    screenbot.NamedPercent("open menu", 65, func() error {
-        _, err := screenbot.Click(screenbot.Point{X: 300, Y: 200}, screenbot.ClickOptions{})
-        return err
-    }),
-    screenbot.NamedPercent("scroll", 25, func() error {
-        return screenbot.Scroll(-3)
-    }),
-    screenbot.NamedPercent("wait", 10, func() error {
-        screenbot.Sleep(500 * time.Millisecond)
-        return nil
-    }),
+```python
+bot.click_image(
+    "assets/button.png",
+    confidence=0.80,
+    scales=(1.0, 0.75, 1.25, 0.5, 2.0),
 )
-if err != nil { log.Fatal(err) }
-fmt.Println("selected action index:", chosen)
 ```
 
-Use `Percent` instead of `NamedPercent` when names are unnecessary. Zero-percent
-actions are allowed and will never be selected.
+---
 
-### Geometry And Coordinates
+## Compatibility with the older Go-style API
 
-```go
-p := screenbot.Point{X: 100, Y: 200}
-box := screenbot.BoxFromXYWH(50, 60, 300, 200)
+The newer Pythonic style is preferred:
 
-book, err := screenbot.NewCoordinateBook("coords.json")
-if err != nil { log.Fatal(err) }
-book.Set("download", p)
-if err := book.Save(); err != nil { log.Fatal(err) }
+```python
+bot.click_image("chrome-logo.png", confidence=0.70, jitter=5)
 ```
 
-### Screenshots And Colors
+But the old style still works:
 
-```go
-box := screenbot.BoxFromXYWH(100, 100, 400, 300)
-if err := screenbot.SaveScreenshot("region.png", &box); err != nil {
-    log.Fatal(err)
-}
+```python
+import screenbot
 
-stats, err := screenbot.GetColorStats(
-    box,
-    screenbot.RGB{R: 255, G: 0, B: 0},
-    10,
-    screenbot.ChannelMode,
+screenbot.ClickImage(
+    "chrome-logo.png",
+    screenbot.MatchOptions(confidence=0.70),
+    screenbot.ClickOptions(offset_radius=5),
 )
-if err != nil { log.Fatal(err) }
-fmt.Println(stats.Count, stats.Percent())
+```
 
-_, err = screenbot.WaitForColor(
-    box, screenbot.RGB{R: 255}, 10, screenbot.ChannelMode,
-    5*time.Second, 100*time.Millisecond,
+---
+
+## Error handling
+
+```python
+from screenbot import ImageNotFound, ScreenBot
+
+bot = ScreenBot()
+
+try:
+    bot.click_image("assets/submit.png", confidence=0.90, timeout=5)
+except ImageNotFound as exc:
+    print("Could not click submit:", exc)
+```
+
+---
+
+## API reference
+
+### Main class
+
+```python
+ScreenBot(
+    confidence=0.80,
+    timeout=0.0,
+    interval=0.25,
+    grayscale=True,
+    scales=(1.0,),
+    jitter=0,
+    move_duration=0.0,
+    coordinate_file="screenbot_coords.json",
+    failsafe=True,
+    pause=0.0,
 )
-if err != nil { log.Fatal(err) }
-
-// Wait for a red pixel near the button, then click it.
-_, err = screenbot.ClickColorWhenVisible(
-    screenbot.Point{X: 500, Y: 300},
-    screenbot.RGB{R: 255},
-    100, 10, screenbot.ChannelMode, nil,
-    5*time.Second, 100*time.Millisecond,
-    screenbot.ClickOptions{},
-)
-if err != nil { log.Fatal(err) }
 ```
 
-### Template Matching
+### Common methods
 
-Template matching is implemented in Go and does not require OpenCV:
+```python
+bot.size
+bot.screen_size()
+bot.screenshot(region=None)
+bot.save_screenshot(path, region=None)
+bot.capture_template(path, box)
 
-```go
-match, err := screenbot.LocateImage("download.png", screenbot.MatchOptions{
-    Confidence: 0.90,
-    Grayscale:  true,
-})
-if err != nil { log.Fatal(err) }
-if match != nil {
-    _, err = screenbot.Click(match.Center(), screenbot.ClickOptions{})
-}
+bot.move_to(point, duration=None)
+bot.click(point, jitter=None, duration=None, button="left", clicks=1)
+bot.click_box(box, padding=0)
+
+bot.save_point(name, point)
+bot.get_point(name)
+bot.click_saved(name)
+
+bot.locate(image_path, confidence=None, region=None, required=False)
+bot.locate_all(image_path, confidence=None, region=None, limit=10)
+bot.wait_for(image_path, timeout=None, required=True)
+bot.click_image(image_path, timeout=None, jitter=None, required=True)
 ```
 
-Use `LocateAllImages`, `WaitForImage`, `MoveToImage`, `ClickImage`, and
-`ClickImageWhenVisible` for common matching workflows. The matcher prioritizes
-portability over OpenCV's speed, so narrow `SearchBox` regions are recommended
-for large screens.
+### Functional API
 
-### Keyboard
+```python
+screenbot.screen_size()
+screenbot.screenshot(region=None)
+screenbot.save_screenshot(path, region=None)
+screenbot.capture_template(path, box)
 
-```go
-screenbot.TypeText("hello", 20*time.Millisecond)
-screenbot.Hotkey(screenbot.PrimaryModifier(), "a")
-screenbot.Copy()
-screenbot.Paste()
-screenbot.HardRefresh()
+screenbot.move_to(point, duration=0.0)
+screenbot.click(point, jitter=0, duration=0.0)
+screenbot.click_box(box, padding=0)
+
+screenbot.locate(image_path, confidence=0.80, required=False)
+screenbot.locate_all(image_path, confidence=0.80, limit=10)
+screenbot.wait_for(image_path, timeout=10, required=True)
+screenbot.click_image(image_path, confidence=0.80, timeout=0, jitter=0)
 ```
 
-ScreenBot controls the real mouse and keyboard. Start with slow actions and
-small test flows. The Go backend does not currently implement PyAutoGUI's
-move-to-corner fail-safe; use process cancellation or an application-specific
-stop mechanism for long-running automation.
+---
 
-## Development
+## Troubleshooting
+
+### `ModuleNotFoundError`
+
+Install the dependencies into the same Python environment that runs your script.
 
 ```bash
-make test
-make vet
-make build
+python -m pip install pyautogui pillow opencv-python numpy
 ```
 
-The original Python implementation remains in the repository for migration
-reference, but Go is now the primary library and CLI.
+With `uv`:
+
+```bash
+uv add pyautogui pillow opencv-python numpy
+uv run python your_script.py
+```
+
+### Screenshot is black or empty on macOS
+
+Grant Screen Recording permission to your terminal or IDE, then restart it.
+
+### Mouse does not move or click on macOS
+
+Grant Accessibility permission to your terminal or IDE, then restart it.
+
+### Image is not found
+
+Try these in order:
+
+1. Lower confidence slightly, such as `confidence=0.70`.
+2. Capture a cleaner template image.
+3. Search only the relevant area with `region=Box(...)`.
+4. Try `grayscale=False` if color matters.
+5. Try multiple `scales` if DPI or zoom is different.
+
+```python
+bot.click_image(
+    "assets/button.png",
+    confidence=0.70,
+    region=Box(0, 0, 1200, 800),
+    scales=(1.0, 0.75, 1.25),
+)
+```
+
+### PyAutoGUI failsafe
+
+By default, PyAutoGUI can abort if you move the mouse to a screen corner. This is a safety feature.
+
+You can disable it, but it is usually better to keep it enabled:
+
+```python
+bot = ScreenBot(failsafe=False)
+```
+
+---
+
+## Suggested project layout
+
+```text
+my-project/
+├── assets/
+│   ├── chrome-logo.png
+│   └── login-button.png
+├── screenbot.py
+├── main.py
+└── README.md
+```
+
+Example `main.py`:
+
+```python
+from screenbot import ScreenBot
+
+bot = ScreenBot(confidence=0.80, timeout=10, jitter=3)
+
+bot.click_image("assets/chrome-logo.png")
+bot.click_image("assets/login-button.png")
+```
