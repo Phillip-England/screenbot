@@ -5,7 +5,7 @@ node_modules
 # output
 out
 dist
-screenbot
+/screenbot
 *.tgz
 
 # code coverage
