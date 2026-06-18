@@ -1,4 +1,4 @@
-module github.com/Phillip-England/screenbot
+module github.com/Phillip-england/screenbot
 
 go 1.23.0
 
