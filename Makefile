@@ -1,9 +1,13 @@
-.PHONY: install test
+.PHONY: build install test vet
 
-UV ?= uv
+build:
+	go build ./cmd/screenbot
 
 install:
-	$(UV) tool install --force .
+	go install ./cmd/screenbot
 
 test:
-	$(UV) run python -m unittest discover -s tests -v
+	go test ./...
+
+vet:
+	go vet ./...

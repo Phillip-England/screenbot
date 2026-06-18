@@ -1,9 +1,11 @@
+
 # dependencies (bun install)
 node_modules
 
 # output
 out
 dist
+screenbot
 *.tgz
 
 # code coverage
