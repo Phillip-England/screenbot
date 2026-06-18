@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Phillip-England/screenbot"
+	"github.com/phillip-england/screenbot"
 )
 
 const usage = `ScreenBot inspects the screen and mouse from the command line.
