@@ -15,6 +15,7 @@ Safety:
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import platform
@@ -954,16 +955,127 @@ def print_system_report() -> None:
 
 
 # -----------------------------------------------------------------------------
-# Tiny manual demo
+# Command-line interface
 # -----------------------------------------------------------------------------
 
-def main() -> None:
-    """Print diagnostics and mouse coordinates until interrupted."""
+def _rgb_hex(color: RGB) -> str:
+    return f"#{color[0]:02X}{color[1]:02X}{color[2]:02X}"
 
-    print_system_report()
-    print("Move your mouse around. Press Ctrl+C to stop coordinate printing.")
-    print_mouse_position()
+
+def _centered_square(center: Point, size: int) -> Box:
+    """Return an exactly size-by-size box centered as closely as possible."""
+
+    if size <= 0:
+        raise ValueError("square size must be greater than zero")
+    left = center.x - size // 2
+    top = center.y - size // 2
+    return Box.from_xywh(left, top, size, size).clamp_to_screen()
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="screenbot",
+        description="Inspect the screen and mouse from the command line.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    pos = subparsers.add_parser("pos", help="print the current mouse position")
+    pos.add_argument("--json", action="store_true", help="emit JSON")
+    pos.add_argument("--watch", action="store_true", help="keep printing until Ctrl+C")
+    pos.add_argument("--interval", type=float, default=0.5, help="watch interval in seconds")
+
+    color = subparsers.add_parser("color", help="inspect colors at or around the mouse")
+    color.add_argument(
+        "square",
+        type=int,
+        nargs="?",
+        help="list unique colors in this many pixels square; -50 is accepted as shorthand for 50",
+    )
+    color.add_argument("--x", type=int, help="x coordinate (defaults to mouse x)")
+    color.add_argument("--y", type=int, help="y coordinate (defaults to mouse y)")
+    color.add_argument("--json", action="store_true", help="emit JSON")
+
+    size = subparsers.add_parser("size", help="print the screen dimensions")
+    size.add_argument("--json", action="store_true", help="emit JSON")
+
+    shot = subparsers.add_parser("screenshot", help="save a screenshot")
+    shot.add_argument("path", nargs="?", default="screenbot.png", help="output PNG path")
+    shot.add_argument("--square", type=int, help="capture a square centered on the mouse")
+
+    subparsers.add_parser("report", help="print detailed system diagnostics as JSON")
+    return parser
+
+
+def _print_position(*, as_json: bool = False) -> None:
+    point = mouse_position()
+    if as_json:
+        print(json.dumps(asdict(point)))
+    else:
+        print(f"{point.x} {point.y}")
+
+
+def _run_color_command(args: argparse.Namespace) -> None:
+    if (args.x is None) != (args.y is None):
+        raise ValueError("--x and --y must be used together")
+    point = Point(args.x, args.y) if args.x is not None else mouse_position()
+
+    if args.square is None:
+        color = pixel_color(point)
+        data = {"x": point.x, "y": point.y, "rgb": list(color), "hex": _rgb_hex(color)}
+        print(json.dumps(data) if args.json else f"{color[0]} {color[1]} {color[2]} {_rgb_hex(color)}")
+        return
+
+    box = _centered_square(point, abs(args.square))
+    pixels = _pil_to_rgb_array(screenshot(box)).reshape(-1, 3)
+    colors, counts = np.unique(pixels, axis=0, return_counts=True)
+    palette = sorted(
+        ((int(count), (int(rgb[0]), int(rgb[1]), int(rgb[2]))) for rgb, count in zip(colors, counts)),
+        key=lambda item: (-item[0], item[1]),
+    )
+    if args.json:
+        print(json.dumps({
+            "box": asdict(box),
+            "total_pixels": int(len(pixels)),
+            "colors": [
+                {"rgb": list(color), "hex": _rgb_hex(color), "count": count}
+                for count, color in palette
+            ],
+        }))
+        return
+    for count, color in palette:
+        print(f"{color[0]} {color[1]} {color[2]} {_rgb_hex(color)} {count}")
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run the ScreenBot command-line interface."""
+
+    parser = _build_cli_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "pos":
+            if args.watch:
+                try:
+                    while True:
+                        _print_position(as_json=args.json)
+                        time.sleep(args.interval)
+                except KeyboardInterrupt:
+                    return 0
+            _print_position(as_json=args.json)
+        elif args.command == "color":
+            _run_color_command(args)
+        elif args.command == "size":
+            width, height = screen_size()
+            print(json.dumps({"width": width, "height": height}) if args.json else f"{width} {height}")
+        elif args.command == "screenshot":
+            box = _centered_square(mouse_position(), args.square) if args.square else None
+            screenshot(box, path=args.path)
+            print(args.path)
+        elif args.command == "report":
+            print_system_report()
+    except (OSError, RuntimeError, ValueError) as error:
+        parser.error(str(error))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

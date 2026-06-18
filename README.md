@@ -42,13 +42,27 @@ Test it:
 uv run python -c "from screenbot import screen_size, mouse_position; print(screen_size()); print(mouse_position())"
 ```
 
-Run the built-in coordinate printer:
+Install the global `screenbot` command from a source checkout:
 
 ```bash
-uv run screenbot
+make install
 ```
 
-Press `Ctrl+C` to stop it.
+Then inspect the mouse and screen from any directory:
+
+```bash
+screenbot pos
+screenbot color
+screenbot color -50
+screenbot size
+screenbot screenshot desktop.png
+screenbot --help
+```
+
+`screenbot color` prints the RGB and hex color under the mouse. Passing a
+square size, such as `-50` (or `50`), lists the unique colors in a centered
+50-by-50 pixel square, most frequent first, with a pixel count. Add `--json`
+to `pos`, `color`, or `size` for machine-readable output.
 
 ## Platform Notes
 
@@ -117,7 +131,7 @@ That clicks somewhere within about 5 pixels of the target point.
 Run:
 
 ```bash
-uv run python screenbot.py
+screenbot pos --watch --interval 0.25
 ```
 
 Or use:
