@@ -205,8 +205,14 @@ func LocateAllImages(path string, options MatchOptions) ([]TemplateMatch, error)
 }
 
 func WaitForImage(path string, timeout, pollInterval time.Duration, options MatchOptions) (TemplateMatch, error) {
+	if timeout < 0 {
+		return TemplateMatch{}, fmt.Errorf("timeout cannot be negative")
+	}
+	if pollInterval <= 0 {
+		return TemplateMatch{}, fmt.Errorf("poll interval must be positive")
+	}
 	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	for {
 		match, err := LocateImage(path, options)
 		if err != nil {
 			return TemplateMatch{}, err
@@ -214,7 +220,11 @@ func WaitForImage(path string, timeout, pollInterval time.Duration, options Matc
 		if match != nil {
 			return *match, nil
 		}
-		time.Sleep(pollInterval)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		time.Sleep(min(pollInterval, remaining))
 	}
 	return TemplateMatch{}, fmt.Errorf("image not found within %s: %s", timeout, path)
 }

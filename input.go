@@ -7,15 +7,30 @@ import (
 
 type MouseButton string
 
+type MoveStyle string
+
 const (
 	LeftButton   MouseButton = "left"
 	RightButton  MouseButton = "right"
 	MiddleButton MouseButton = "center"
+
+	InstantMovement MoveStyle = "instant"
+	LinearMovement  MoveStyle = "linear"
+	HumanMovement   MoveStyle = "human"
 )
 
 type MoveOptions struct {
-	Duration     time.Duration
-	JitterRadius int
+	Style             MoveStyle
+	Duration          time.Duration
+	JitterRadius      int
+	CurveRadius       int
+	Detours           int
+	DetourRadius      int
+	OvershootDistance int
+	Steps             int
+	PauseChance       float64
+	PauseMin          time.Duration
+	PauseMax          time.Duration
 }
 
 type ClickOptions struct {
@@ -30,11 +45,37 @@ func MoveTo(point Point, options MoveOptions) (Point, error) {
 	if err != nil {
 		return Point{}, err
 	}
-	if err := currentBackend().Move(p, options.Duration); err != nil {
+	if err := movePointer(p, options); err != nil {
 		return Point{}, err
 	}
 	time.Sleep(pause)
 	return p, nil
+}
+
+// HumanMoveOptions returns practical defaults that can be selectively overridden.
+func HumanMoveOptions(duration time.Duration) MoveOptions {
+	return MoveOptions{
+		Style:        HumanMovement,
+		Duration:     duration,
+		CurveRadius:  80,
+		Steps:        40,
+		PauseChance:  0.08,
+		PauseMin:     15 * time.Millisecond,
+		PauseMax:     70 * time.Millisecond,
+		DetourRadius: 35,
+	}
+}
+
+func MoveInstant(point Point) (Point, error) {
+	return MoveTo(point, MoveOptions{Style: InstantMovement})
+}
+
+func MoveLinear(point Point, duration time.Duration) (Point, error) {
+	return MoveTo(point, MoveOptions{Style: LinearMovement, Duration: duration})
+}
+
+func MoveHuman(point Point, duration time.Duration) (Point, error) {
+	return MoveTo(point, HumanMoveOptions(duration))
 }
 
 func Click(point Point, options ClickOptions) (Point, error) {

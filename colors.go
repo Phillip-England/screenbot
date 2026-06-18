@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"time"
 )
 
 type ColorMode string
@@ -83,6 +84,73 @@ func BoxHasColorPercent(box Box, target RGB, minPercent float64, tolerance int, 
 	return percent >= minPercent, err
 }
 
+func validateColorWait(timeout, pollInterval time.Duration) error {
+	if timeout < 0 {
+		return fmt.Errorf("timeout cannot be negative")
+	}
+	if pollInterval <= 0 {
+		return fmt.Errorf("poll interval must be positive")
+	}
+	return nil
+}
+
+// WaitForColor waits until at least one pixel in box matches target.
+func WaitForColor(box Box, target RGB, tolerance int, mode ColorMode, timeout, pollInterval time.Duration) (ColorStats, error) {
+	return WaitForColorCount(box, target, 1, tolerance, mode, timeout, pollInterval)
+}
+
+// WaitForColorCount waits until at least minCount pixels in box match target.
+func WaitForColorCount(box Box, target RGB, minCount, tolerance int, mode ColorMode, timeout, pollInterval time.Duration) (ColorStats, error) {
+	if minCount < 1 {
+		return ColorStats{}, fmt.Errorf("minimum color count must be positive")
+	}
+	if err := validateColorWait(timeout, pollInterval); err != nil {
+		return ColorStats{}, err
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		stats, err := GetColorStats(box, target, tolerance, mode)
+		if err != nil {
+			return ColorStats{}, err
+		}
+		if stats.Count >= minCount {
+			return stats, nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		time.Sleep(min(pollInterval, remaining))
+	}
+	return ColorStats{}, fmt.Errorf("color %s did not reach %d pixels within %s", target.Hex(), minCount, timeout)
+}
+
+// WaitForColorPercent waits until target covers at least minPercent of box.
+func WaitForColorPercent(box Box, target RGB, minPercent float64, tolerance int, mode ColorMode, timeout, pollInterval time.Duration) (ColorStats, error) {
+	if minPercent <= 0 || minPercent > 100 {
+		return ColorStats{}, fmt.Errorf("minimum color percent must be greater than 0 and at most 100")
+	}
+	if err := validateColorWait(timeout, pollInterval); err != nil {
+		return ColorStats{}, err
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		stats, err := GetColorStats(box, target, tolerance, mode)
+		if err != nil {
+			return ColorStats{}, err
+		}
+		if stats.Percent() >= minPercent {
+			return stats, nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		time.Sleep(min(pollInterval, remaining))
+	}
+	return ColorStats{}, fmt.Errorf("color %s did not reach %.2f%% within %s", target.Hex(), minPercent, timeout)
+}
+
 func FindNearestColor(anchor Point, target RGB, radius, tolerance int, mode ColorMode, searchBox *Box) (*Point, error) {
 	area := BoxAround(anchor, radius)
 	if searchBox != nil {
@@ -123,6 +191,32 @@ func FindNearestColor(anchor Point, target RGB, radius, tolerance int, mode Colo
 	return best, nil
 }
 
+// WaitForNearestColor waits for a matching pixel near anchor and returns its screen coordinate.
+func WaitForNearestColor(anchor Point, target RGB, radius, tolerance int, mode ColorMode, searchBox *Box, timeout, pollInterval time.Duration) (Point, error) {
+	if radius < 0 {
+		return Point{}, fmt.Errorf("radius cannot be negative")
+	}
+	if err := validateColorWait(timeout, pollInterval); err != nil {
+		return Point{}, err
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		point, err := FindNearestColor(anchor, target, radius, tolerance, mode, searchBox)
+		if err != nil {
+			return Point{}, err
+		}
+		if point != nil {
+			return *point, nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		time.Sleep(min(pollInterval, remaining))
+	}
+	return Point{}, fmt.Errorf("color %s not found within radius %d and timeout %s", target.Hex(), radius, timeout)
+}
+
 func ClickNearestColor(anchor Point, target RGB, radius, tolerance int, mode ColorMode, options ClickOptions) (Point, error) {
 	p, err := FindNearestColor(anchor, target, radius, tolerance, mode, nil)
 	if err != nil {
@@ -132,4 +226,13 @@ func ClickNearestColor(anchor Point, target RGB, radius, tolerance int, mode Col
 		return Point{}, fmt.Errorf("color %v not found within radius %d", target, radius)
 	}
 	return Click(*p, options)
+}
+
+// ClickColorWhenVisible waits for the nearest matching pixel and clicks it.
+func ClickColorWhenVisible(anchor Point, target RGB, radius, tolerance int, mode ColorMode, searchBox *Box, timeout, pollInterval time.Duration, options ClickOptions) (Point, error) {
+	point, err := WaitForNearestColor(anchor, target, radius, tolerance, mode, searchBox, timeout, pollInterval)
+	if err != nil {
+		return Point{}, err
+	}
+	return Click(point, options)
 }

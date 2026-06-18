@@ -74,6 +74,62 @@ func main() {
 }
 ```
 
+### Mouse Movement
+
+The zero-value options jump immediately, while the convenience functions make
+the intended movement style explicit:
+
+```go
+screenbot.MoveInstant(screenbot.Point{X: 100, Y: 200})
+screenbot.MoveLinear(screenbot.Point{X: 500, Y: 300}, 400*time.Millisecond)
+screenbot.MoveHuman(screenbot.Point{X: 800, Y: 450}, 700*time.Millisecond)
+```
+
+Start with `HumanMoveOptions` when the path needs controlled imperfections:
+
+```go
+move := screenbot.HumanMoveOptions(900 * time.Millisecond)
+move.Detours = 1
+move.DetourRadius = 45
+move.OvershootDistance = 12
+move.JitterRadius = 3
+move.PauseChance = 0.12
+move.PauseMin = 20 * time.Millisecond
+move.PauseMax = 90 * time.Millisecond
+
+_, err := screenbot.MoveTo(screenbot.Point{X: 800, Y: 450}, move)
+```
+
+`CurveRadius` controls the bend, `Steps` controls path smoothness, and
+`Duration` covers movement time; random pauses are additional. The same
+options can be embedded in `ClickOptions` for human-style move-and-click flows.
+
+### Percentage-Based Actions
+
+`RunWeightedAction` chooses and runs exactly one action. The percentages must
+total 100:
+
+```go
+chosen, err := screenbot.RunWeightedAction(
+    screenbot.NamedPercent("open menu", 65, func() error {
+        _, err := screenbot.Click(screenbot.Point{X: 300, Y: 200}, screenbot.ClickOptions{})
+        return err
+    }),
+    screenbot.NamedPercent("scroll", 25, func() error {
+        return screenbot.Scroll(-3)
+    }),
+    screenbot.NamedPercent("wait", 10, func() error {
+        screenbot.Sleep(500 * time.Millisecond)
+        return nil
+    }),
+)
+if err != nil { log.Fatal(err) }
+fmt.Println("selected action index:", chosen)
+```
+
+Use `Percent` instead of `NamedPercent` when names are unnecessary. Zero-percent
+actions are allowed and will never be selected.
+
 ### Geometry And Coordinates
 
 ```go
@@ -102,6 +158,22 @@ stats, err := screenbot.GetColorStats(
 )
 if err != nil { log.Fatal(err) }
 fmt.Println(stats.Count, stats.Percent())
+
+_, err = screenbot.WaitForColor(
+    box, screenbot.RGB{R: 255}, 10, screenbot.ChannelMode,
+    5*time.Second, 100*time.Millisecond,
+)
+if err != nil { log.Fatal(err) }
+
+// Wait for a red pixel near the button, then click it.
+_, err = screenbot.ClickColorWhenVisible(
+    screenbot.Point{X: 500, Y: 300},
+    screenbot.RGB{R: 255},
+    100, 10, screenbot.ChannelMode, nil,
+    5*time.Second, 100*time.Millisecond,
+    screenbot.ClickOptions{},
+)
+if err != nil { log.Fatal(err) }
 ```
 
 ### Template Matching
@@ -119,9 +191,10 @@ if match != nil {
 }
 ```
 
-Use `LocateAllImages`, `WaitForImage`, `MoveToImage`, and `ClickImage` for
-common matching workflows. The matcher prioritizes portability over OpenCV's
-speed, so narrow `SearchBox` regions are recommended for large screens.
+Use `LocateAllImages`, `WaitForImage`, `MoveToImage`, `ClickImage`, and
+`ClickImageWhenVisible` for common matching workflows. The matcher prioritizes
+portability over OpenCV's speed, so narrow `SearchBox` regions are recommended
+for large screens.
 
 ### Keyboard
 
