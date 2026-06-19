@@ -305,6 +305,16 @@ class ImageClickAllTests(unittest.TestCase):
 
 
 class WaitForAndClickTests(unittest.TestCase):
+    def test_default_timeout_is_one_second(self) -> None:
+        bot = ScreenBot(backend=Mock())
+
+        self.assertEqual(bot.timeout, 1.0)
+
+    def test_default_timeout_can_be_configured(self) -> None:
+        bot = ScreenBot(backend=Mock(), timeout=4.5)
+
+        self.assertEqual(bot.timeout, 4.5)
+
     def test_waits_then_right_clicks_with_variation_inside_image(self) -> None:
         backend = Mock()
         backend.locateOnScreen.side_effect = [

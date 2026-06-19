@@ -229,7 +229,7 @@ class ScreenBot:
         state: str = DEFAULT,
         *,
         confidence: float = 0.80,
-        timeout: float = 0.0,
+        timeout: float = 1.0,
         poll_interval: float = 0.25,
         grayscale: bool = True,
         scales: Sequence[float] = (1.0,),

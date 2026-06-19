@@ -261,6 +261,8 @@ it runs, otherwise `run_with_chance()` returns `None`.
 ### Screenshots and image matching
 
 ```python
+bot = ScreenBot(timeout=3)  # Default for wait_for and image-click helpers.
+
 bot.save_screenshot("screen.png")
 bot.save_screenshot("region.png", box)
 bot.capture_template("save-button.png", box)
@@ -284,7 +286,8 @@ bot.wait_for_and_click(
 `wait_for_and_click()` waits and clicks once, and `click_all_images()` clicks all
 visible matches. Constructor defaults include
 `confidence`, `timeout`, `poll_interval`, `grayscale`, `scales`, and
-`coordinate_file`.
+`coordinate_file`. The timeout defaults to one second and can be overridden on
+individual calls; use `timeout=0` for an immediate check.
 
 ### Named points
 
