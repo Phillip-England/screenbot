@@ -1,1067 +1,1505 @@
-"""
-screenbot
-=========
-
-A small Pythonic screen automation helper built on top of PyAutoGUI and OpenCV.
-
-The main API is intentionally simple:
-
-    from screenbot import ScreenBot
-
-    bot = ScreenBot()
-    bot.click_image("chrome-logo.png", confidence=0.70, timeout=10, jitter=4)
-
-You can also use the module-level functions directly:
-
-    import screenbot
-
-    screenbot.click((100, 200), jitter=5)
-    match = screenbot.locate("button.png", confidence=0.85)
-
-Dependencies:
-    pip install pyautogui pillow opencv-python numpy
-
-macOS note:
-    Your terminal, IDE, or Python executable may need Accessibility and
-    Screen Recording permissions before screenshots/clicks work.
-"""
+"""Stateful screen automation with one public entry point: :class:`ScreenBot`."""
 
 from __future__ import annotations
 
 import json
 import math
+import os
 import random
+import signal
+import sys
 import time
+from collections import Counter
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Iterator, Optional, Sequence
 
-try:
-    import cv2
-    import numpy as np
-    import pyautogui
-    from PIL import Image
-except ImportError as exc:  # pragma: no cover
-    raise ImportError(
-        "screenbot requires pyautogui, pillow, opencv-python, and numpy.\n"
-        "Install them with:\n\n"
-        "    pip install pyautogui pillow opencv-python numpy\n\n"
-        f"Original import error: {exc}"
-    ) from exc
+import pyautogui
+import pyscreeze
+from PIL import Image
+from pynput import keyboard, mouse
 
-
-__all__ = [
-    "Box",
-    "ClickOptions",
-    "ImageNotFound",
-    "ImageNotFoundError",
-    "Match",
-    "MatchResult",
-    "MatchOptions",
-    "Point",
-    "ScreenBot",
-    "ScreenBotError",
-    "capture_template",
-    "click",
-    "click_box",
-    "click_image",
-    "click_saved",
-    "locate",
-    "locate_all",
-    "move_to",
-    "save_point",
-    "save_screenshot",
-    "screenshot",
-    "screen_size",
-    "wait_for",
-    # Backward-compatible Go-style aliases.
-    "ClickImage",
-    "LocateImage",
-    "WaitForImage",
-]
-
-
-Number = Union[int, float]
-PointInput = Union["Point", Tuple[int, int], List[int]]
-BoxInput = Union["Box", Tuple[int, int, int, int], List[int]]
-PathInput = Union[str, Path]
-Button = str
-
-
-class ScreenBotError(Exception):
-    """Base exception for screenbot."""
-
-
-class ImageNotFound(ScreenBotError):
-    """Raised when an image cannot be found and the operation requires it."""
-
-
-# Name used by the earlier version.
-ImageNotFoundError = ImageNotFound
-
-
-@dataclass(frozen=True)
-class Point:
-    """A screen coordinate."""
-
-    x: int
-    y: int
-
-    @classmethod
-    def from_value(cls, value: PointInput) -> "Point":
-        if isinstance(value, Point):
-            return value
-        if len(value) != 2:  # type: ignore[arg-type]
-            raise ValueError("Point must be Point(x, y) or a 2-item tuple/list")
-        return cls(int(value[0]), int(value[1]))  # type: ignore[index]
-
-    def offset(self, dx: Number = 0, dy: Number = 0) -> "Point":
-        """Return a new point shifted by dx/dy."""
-
-        return Point(int(round(self.x + dx)), int(round(self.y + dy)))
-
-    def as_tuple(self) -> Tuple[int, int]:
-        return self.x, self.y
-
-    # Compatibility with the previous API.
-    from_any = from_value
-    shifted = offset
-    to_tuple = as_tuple
-
-
-@dataclass(frozen=True)
-class Box:
-    """A screen rectangle using x, y, width, height."""
-
-    x: int
-    y: int
-    width: int
-    height: int
-
-    @classmethod
-    def from_value(cls, value: BoxInput) -> "Box":
-        if isinstance(value, Box):
-            return value
-        if len(value) != 4:  # type: ignore[arg-type]
-            raise ValueError("Box must be Box(x, y, width, height) or a 4-item tuple/list")
-        return cls(int(value[0]), int(value[1]), int(value[2]), int(value[3]))  # type: ignore[index]
-
-    @classmethod
-    def from_xyxy(cls, left: int, top: int, right: int, bottom: int) -> "Box":
-        """Create a box from left/top/right/bottom coordinates."""
-
-        return cls(left, top, right - left, bottom - top)
-
-    @property
-    def left(self) -> int:
-        return self.x
-
-    @property
-    def top(self) -> int:
-        return self.y
-
-    @property
-    def right(self) -> int:
-        return self.x + self.width
-
-    @property
-    def bottom(self) -> int:
-        return self.y + self.height
-
-    @property
-    def center(self) -> Point:
-        return Point(self.x + self.width // 2, self.y + self.height // 2)
-
-    def contains(self, point: PointInput) -> bool:
-        p = Point.from_value(point)
-        return self.left <= p.x <= self.right and self.top <= p.y <= self.bottom
-
-    def inset(self, pixels: int) -> "Box":
-        """Return a smaller box inset on every side."""
-
-        return Box(
-            self.x + pixels,
-            self.y + pixels,
-            max(0, self.width - pixels * 2),
-            max(0, self.height - pixels * 2),
-        )
-
-    def random_point(self, padding: int = 0) -> Point:
-        """Pick a random point inside the box."""
-
-        box = self.inset(padding) if padding else self
-        if box.width <= 0 or box.height <= 0:
-            return self.center
-        return Point(
-            random.randint(box.left, max(box.left, box.right - 1)),
-            random.randint(box.top, max(box.top, box.bottom - 1)),
-        )
-
-    def as_tuple(self) -> Tuple[int, int, int, int]:
-        return self.x, self.y, self.width, self.height
-
-    # Compatibility with the previous API.
-    from_any = from_value
-    to_tuple = as_tuple
-
-
-@dataclass(frozen=True)
-class Match:
-    """The location and score of an image match."""
-
-    x: int
-    y: int
-    width: int
-    height: int
-    confidence: float
-    image_path: str
-    scale: float = 1.0
-
-    @property
-    def found(self) -> bool:
-        return True
-
-    @property
-    def center(self) -> Point:
-        return Point(self.x + self.width // 2, self.y + self.height // 2)
-
-    @property
-    def box(self) -> Box:
-        return Box(self.x, self.y, self.width, self.height)
-
-    def as_dict(self) -> Dict[str, object]:
-        data = asdict(self)
-        data["found"] = True
-        data["center"] = self.center.as_tuple()
-        return data
-
-    # Compatibility with the previous API.
-    to_dict = as_dict
-
-
-# Name used by the earlier version.
-MatchResult = Match
-
-
-# Backward-compatible option objects. The preferred API is keyword arguments.
-@dataclass
-class MatchOptions:
-    confidence: float = 0.80
-    region: Optional[BoxInput] = None
-    grayscale: bool = True
-    timeout: float = 0.0
-    interval: float = 0.25
-    scales: Sequence[float] = (1.0,)
-    raise_on_missing: bool = True
-
-
-@dataclass
-class ClickOptions:
-    button: Button = "left"
-    clicks: int = 1
-    interval: float = 0.0
-    duration: float = 0.0
-    offset: Optional[Tuple[int, int]] = None
-    offset_radius: int = 0
-    move_only: bool = False
-    dry_run: bool = False
-    pause_after: float = 0.0
-
-
-class CoordinateStore:
-    """JSON-backed storage for named screen coordinates."""
-
-    def __init__(self, path: PathInput = "screenbot_coords.json"):
-        self.path = Path(path)
-        self.points: Dict[str, Point] = {}
-        self.load()
-
-    def load(self) -> "CoordinateStore":
-        if not self.path.exists():
-            self.points = {}
-            return self
-
-        raw = json.loads(self.path.read_text())
-        self.points = {name: Point.from_value(value) for name, value in raw.items()}
-        return self
-
-    def save(self) -> "CoordinateStore":
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        data = {name: point.as_tuple() for name, point in self.points.items()}
-        self.path.write_text(json.dumps(data, indent=2, sort_keys=True))
-        return self
-
-    def set(self, name: str, point: PointInput) -> Point:
-        self.points[name] = Point.from_value(point)
-        self.save()
-        return self.points[name]
-
-    def get(self, name: str) -> Point:
-        try:
-            return self.points[name]
-        except KeyError as exc:
-            raise KeyError(f"No saved point named {name!r}") from exc
-
-    def delete(self, name: str) -> None:
-        self.points.pop(name, None)
-        self.save()
-
-    def all(self) -> Dict[str, Point]:
-        return dict(self.points)
+__all__ = ["ScreenBot"]
 
 
 class ScreenBot:
-    """
-    Convenience wrapper that holds defaults and saved coordinates.
+    """Screen automation whose input behavior is controlled by a state.
 
-    Prefer this when writing automation scripts because it keeps your defaults in
-    one place:
-
-        bot = ScreenBot(confidence=0.85, timeout=5, jitter=3)
-        bot.click_image("submit-button.png")
+    ``default`` performs input immediately. ``human-like`` uses seeded random
+    pauses, curved mouse paths, small target variation, click dwell, typing
+    cadence, and chunked scrolling. Randomness never changes the requested text,
+    key sequence, button, or final destination.
     """
+
+    DEFAULT = "default"
+    HUMAN_LIKE = "human-like"
+    STATES = (DEFAULT, HUMAN_LIKE)
+
+    class Error(Exception):
+        """Base exception for ScreenBot operations."""
+
+    class ImageNotFound(Error):
+        """Raised when a required image cannot be found."""
+
+    @dataclass(frozen=True)
+    class Point:
+        x: int
+        y: int
+
+        def as_tuple(self) -> tuple[int, int]:
+            return self.x, self.y
+
+        def offset(self, dx: float = 0, dy: float = 0) -> "ScreenBot.Point":
+            return ScreenBot.Point(round(self.x + dx), round(self.y + dy))
+
+    @dataclass(frozen=True)
+    class Box:
+        top_left: "ScreenBot.Point"
+        top_right: "ScreenBot.Point"
+        bottom_right: "ScreenBot.Point"
+        bottom_left: "ScreenBot.Point"
+
+        def __post_init__(self) -> None:
+            points = tuple(ScreenBot._point(point) for point in self.as_tuple())
+            object.__setattr__(self, "top_left", points[0])
+            object.__setattr__(self, "top_right", points[1])
+            object.__setattr__(self, "bottom_right", points[2])
+            object.__setattr__(self, "bottom_left", points[3])
+
+            if not (
+                points[0].y == points[1].y
+                and points[1].x == points[2].x
+                and points[2].y == points[3].y
+                and points[3].x == points[0].x
+                and points[0].x <= points[1].x
+                and points[0].y <= points[3].y
+            ):
+                raise ValueError(
+                    "box points must form an axis-aligned rectangle in "
+                    "top-left, top-right, bottom-right, bottom-left order"
+                )
+
+        @property
+        def x(self) -> int:
+            return self.top_left.x
+
+        @property
+        def y(self) -> int:
+            return self.top_left.y
+
+        @property
+        def width(self) -> int:
+            return self.top_right.x - self.top_left.x
+
+        @property
+        def height(self) -> int:
+            return self.bottom_left.y - self.top_left.y
+
+        @property
+        def left(self) -> int:
+            return self.x
+
+        @property
+        def top(self) -> int:
+            return self.y
+
+        @property
+        def right(self) -> int:
+            return self.x + self.width
+
+        @property
+        def bottom(self) -> int:
+            return self.y + self.height
+
+        @property
+        def center(self) -> "ScreenBot.Point":
+            return ScreenBot.Point(self.x + self.width // 2, self.y + self.height // 2)
+
+        def as_tuple(self) -> tuple["ScreenBot.Point", "ScreenBot.Point", "ScreenBot.Point", "ScreenBot.Point"]:
+            return self.top_left, self.top_right, self.bottom_right, self.bottom_left
+
+        def as_region_tuple(self) -> tuple[int, int, int, int]:
+            return self.x, self.y, self.width, self.height
+
+    @dataclass(frozen=True)
+    class Match:
+        x: int
+        y: int
+        width: int
+        height: int
+        confidence: float
+        image_path: str
+        scale: float = 1.0
+
+        @property
+        def center(self) -> "ScreenBot.Point":
+            return ScreenBot.Point(self.x + self.width // 2, self.y + self.height // 2)
+
+        @property
+        def box(self) -> "ScreenBot.Box":
+            return ScreenBot.Box(
+                (self.x, self.y),
+                (self.x + self.width, self.y),
+                (self.x + self.width, self.y + self.height),
+                (self.x, self.y + self.height),
+            )
+
+        def as_dict(self) -> dict[str, object]:
+            value = asdict(self)
+            value["center"] = self.center.as_tuple()
+            return value
+
+    @dataclass(frozen=True)
+    class ColorCount:
+        """An RGB color and its frequency in an image or screen region."""
+
+        color: tuple[int, int, int]
+        count: int
+        percentage: float
+
+        @property
+        def hex(self) -> str:
+            return "#" + "".join(f"{channel:02X}" for channel in self.color)
+
+        def as_dict(self) -> dict[str, object]:
+            return {
+                "rgb": list(self.color),
+                "hex": self.hex,
+                "count": self.count,
+                "percentage": self.percentage,
+            }
+
+    @dataclass(frozen=True)
+    class Pixel:
+        """One pixel at a screen or image coordinate."""
+
+        x: int
+        y: int
+        color: tuple[int, int, int]
+
+        @property
+        def hex(self) -> str:
+            return "#" + "".join(f"{channel:02X}" for channel in self.color)
+
+        def as_dict(self) -> dict[str, object]:
+            return {"x": self.x, "y": self.y, "rgb": list(self.color), "hex": self.hex}
 
     def __init__(
         self,
+        state: str = DEFAULT,
         *,
         confidence: float = 0.80,
         timeout: float = 0.0,
-        interval: float = 0.25,
+        poll_interval: float = 0.25,
         grayscale: bool = True,
         scales: Sequence[float] = (1.0,),
-        jitter: int = 0,
-        move_duration: float = 0.0,
-        coordinate_file: PathInput = "screenbot_coords.json",
+        coordinate_file: str | Path = "screenbot_coords.json",
+        seed: Optional[int] = None,
         failsafe: bool = True,
-        pause: float = 0.0,
-        default_match: Optional[MatchOptions] = None,
-        default_click: Optional[ClickOptions] = None,
-        coord_path: Optional[PathInput] = None,
-    ):
-        if default_match is not None:
-            confidence = default_match.confidence
-            timeout = default_match.timeout
-            interval = default_match.interval
-            grayscale = default_match.grayscale
-            scales = default_match.scales
-        if default_click is not None:
-            jitter = default_click.offset_radius
-            move_duration = default_click.duration
-        if coord_path is not None:
-            coordinate_file = coord_path
+        kill_sequence: Optional[str] = None,
+        backend: Any = None,
+        sleeper: Any = time.sleep,
+    ) -> None:
+        self.confidence = self._confidence(confidence)
+        self.timeout = self._non_negative(timeout, "timeout")
+        self.poll_interval = self._non_negative(poll_interval, "poll_interval")
+        self.grayscale = bool(grayscale)
+        self.scales = self._validate_scales(scales)
+        self.coordinate_file = Path(coordinate_file)
+        self._backend = backend or pyautogui
+        self._display_scale: Optional[tuple[float, float]] = None
+        self._sleep = sleeper
+        self._random = random.Random(seed)
+        self._state = self._normalize_state(state)
+        self.kill_sequence: Optional[str] = None
+        self._kill_buffer = ""
+        self._kill_listener: Any = None
 
-        self.confidence = confidence
-        self.timeout = timeout
-        self.interval = interval
-        self.grayscale = grayscale
-        self.scales = tuple(scales)
-        self.jitter = jitter
-        self.move_duration = move_duration
-        self.coords = CoordinateStore(coordinate_file)
+        # Human-like ranges are public so scripts can tune behavior directly.
+        self.human_pause = (0.04, 0.16)
+        self.human_move_duration = (0.22, 0.72)
+        self.human_click_dwell = (0.035, 0.12)
+        self.human_key_interval = (0.035, 0.14)
+        self.human_scroll_pause = (0.04, 0.13)
+        self.human_target_jitter = 2
+        self.human_image_padding = 3
+        self.human_path_deviation = (0.14, 0.42)
+        self.human_speed_variation = (0.35, 2.40)
+        self.human_overshoot_chance = 0.35
 
-        pyautogui.FAILSAFE = failsafe
-        pyautogui.PAUSE = pause
+        self._backend.FAILSAFE = failsafe
+        self._backend.PAUSE = 0
+        self.configure_kill_sequence(kill_sequence)
 
     @property
-    def size(self) -> Tuple[int, int]:
-        return screen_size()
+    def state(self) -> str:
+        return self._state
 
-    def screen_size(self) -> Tuple[int, int]:
-        return screen_size()
+    @property
+    def is_human_like(self) -> bool:
+        return self._state == self.HUMAN_LIKE
 
-    def screenshot(self, region: Optional[BoxInput] = None) -> Image.Image:
-        return screenshot(region)
+    def set_state(self, state: str) -> "ScreenBot":
+        """Change behavior and return this bot for fluent setup."""
+        self._state = self._normalize_state(state)
+        return self
 
-    def save_screenshot(self, path: PathInput, region: Optional[BoxInput] = None) -> Path:
-        return save_screenshot(path, region)
+    @contextmanager
+    def using_state(self, state: str) -> Iterator["ScreenBot"]:
+        """Temporarily use a state, restoring the previous state afterward."""
+        previous = self._state
+        self.set_state(state)
+        try:
+            yield self
+        finally:
+            self._state = previous
 
-    def capture_template(self, path: PathInput, box: BoxInput) -> Path:
-        return capture_template(path, box)
+    def reseed(self, seed: Optional[int]) -> "ScreenBot":
+        """Reset the random stream used by chance and human-like behavior."""
+        self._random.seed(seed)
+        return self
 
-    def move_to(self, point: PointInput, *, duration: Optional[float] = None) -> Point:
-        return move_to(point, duration=self.move_duration if duration is None else duration)
+    def chance(self, percentage: float) -> bool:
+        """Return whether an event with the given percentage should occur."""
+        probability = self._percentage(percentage, "percentage")
+        if probability == 0:
+            return False
+        if probability == 100:
+            return True
+        return self._random.random() < probability / 100
+
+    def run_with_chance(
+        self,
+        percentage: float,
+        action: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Run a callable at the given percentage chance, or return None."""
+        if not callable(action):
+            raise TypeError("action must be callable")
+        if self.chance(percentage):
+            return action(*args, **kwargs)
+        return None
+
+    def configure_kill_sequence(self, sequence: Optional[str]) -> "ScreenBot":
+        """Stop execution when a character sequence is typed anywhere."""
+        if sequence is not None and (not isinstance(sequence, str) or not sequence):
+            raise ValueError("kill_sequence must be a non-empty string or None")
+        self.stop_kill_listener()
+        if sequence is None:
+            self.kill_sequence = None
+            return self
+
+        self.kill_sequence = sequence
+        self._kill_buffer = ""
+
+        def on_press(key: Any) -> Optional[bool]:
+            char = getattr(key, "char", None)
+            if char is None:
+                self._kill_buffer = ""
+                return None
+            self._kill_buffer = (self._kill_buffer + char)[-len(sequence):]
+            if self._kill_buffer == sequence:
+                self.stop_kill_listener()
+                os.kill(os.getpid(), signal.SIGINT)
+                return False
+            return None
+
+        self._kill_listener = keyboard.Listener(on_press=on_press)
+        self._kill_listener.start()
+        return self
+
+    def stop_kill_listener(self) -> "ScreenBot":
+        """Disable and release the global kill-sequence listener."""
+        listener = self._kill_listener
+        self._kill_listener = None
+        self._kill_buffer = ""
+        if listener is not None:
+            listener.stop()
+        return self
+
+    def configure_human_like(
+        self,
+        *,
+        pause: Optional[tuple[float, float]] = None,
+        move_duration: Optional[tuple[float, float]] = None,
+        click_dwell: Optional[tuple[float, float]] = None,
+        key_interval: Optional[tuple[float, float]] = None,
+        scroll_pause: Optional[tuple[float, float]] = None,
+        target_jitter: Optional[int] = None,
+        image_padding: Optional[int] = None,
+        path_deviation: Optional[tuple[float, float]] = None,
+        speed_variation: Optional[tuple[float, float]] = None,
+        overshoot_chance: Optional[float] = None,
+    ) -> "ScreenBot":
+        """Tune human-like timing and spatial variation ranges."""
+        for name, value in (
+            ("human_pause", pause),
+            ("human_move_duration", move_duration),
+            ("human_click_dwell", click_dwell),
+            ("human_key_interval", key_interval),
+            ("human_scroll_pause", scroll_pause),
+        ):
+            if value is not None:
+                setattr(self, name, self._range(value, name))
+        if target_jitter is not None:
+            self.human_target_jitter = self._integer_non_negative(target_jitter, "target_jitter")
+        if image_padding is not None:
+            self.human_image_padding = self._integer_non_negative(image_padding, "image_padding")
+        if path_deviation is not None:
+            self.human_path_deviation = self._range(path_deviation, "path_deviation")
+        if speed_variation is not None:
+            self.human_speed_variation = self._positive_range(speed_variation, "speed_variation")
+        if overshoot_chance is not None:
+            self.human_overshoot_chance = self._probability(overshoot_chance, "overshoot_chance")
+        return self
+
+    # Screen and pointer -------------------------------------------------
+
+    def screen_size(self) -> tuple[int, int]:
+        size = self._backend.size()
+        return int(size.width), int(size.height)
+
+    def mouse_position(self) -> "ScreenBot.Point":
+        point = self._backend.position()
+        return self.Point(int(point.x), int(point.y))
+
+    def screenshot(self, region: Any = None) -> Image.Image:
+        box = None if region is None else self._box(region)
+        return self._backend.screenshot(region=None if box is None else box.as_region_tuple())
+
+    def save_screenshot(self, path: str | Path, region: Any = None) -> Path:
+        output = Path(path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        self.screenshot(region).save(output)
+        return output
+
+    def pixel_color(self, point: Any = None) -> tuple[int, int, int]:
+        """Return the RGB color at a screen point, or at the mouse position."""
+        target = self.mouse_position() if point is None else self._point(point)
+        color = self._backend.pixel(target.x, target.y)
+        return tuple(int(channel) for channel in color[:3])
+
+    def colors_in_box(self, box: Any) -> list["ScreenBot.ColorCount"]:
+        """Count RGB colors in a screen box, ordered from most common."""
+        return self._color_counts(self.screenshot(self._box(box)))
+
+    def colors_in_image(self, path: str | Path) -> list["ScreenBot.ColorCount"]:
+        """Count RGB colors in an image file, ordered from most common."""
+        source = Path(path)
+        try:
+            with Image.open(source) as image:
+                image.load()
+                return self._color_counts(image)
+        except (OSError, ValueError) as error:
+            raise ValueError(f"Could not read image: {source}") from error
+
+    def pixels_in_box(self, box: Any) -> Iterator["ScreenBot.Pixel"]:
+        """Yield every pixel in a screen box in row-major order."""
+        area = self._box(box)
+        image = self.screenshot(area).convert("RGB")
+        try:
+            for y in range(image.height):
+                for x in range(image.width):
+                    color = tuple(int(channel) for channel in image.getpixel((x, y)))
+                    yield self.Pixel(area.left + x, area.top + y, color)
+        finally:
+            image.close()
+
+    def capture_template(self, path: str | Path, box: Any) -> Path:
+        return self.save_screenshot(path, self._box(box))
+
+    def move_to(self, point: Any, *, duration: Optional[float] = None) -> "ScreenBot.Point":
+        target = self._point(point)
+        if not self.is_human_like:
+            self._backend.moveTo(target.x, target.y, duration=0 if duration is None else duration)
+            return target
+
+        self._pause(self.human_pause)
+        self._human_move(target, duration)
+        self._pause(self.human_pause, factor=0.35)
+        return target
+
+    def move_mouse_up(
+        self,
+        distance: int,
+        *,
+        variation: int = 0,
+        duration: Optional[float | tuple[float, float]] = None,
+    ) -> "ScreenBot.Point":
+        """Move up by ``distance +/- variation`` pixels with human-like motion."""
+        return self._move_mouse_direction(0, -1, distance, variation, duration)
+
+    def move_mouse_down(
+        self,
+        distance: int,
+        *,
+        variation: int = 0,
+        duration: Optional[float | tuple[float, float]] = None,
+    ) -> "ScreenBot.Point":
+        """Move down by ``distance +/- variation`` pixels with human-like motion."""
+        return self._move_mouse_direction(0, 1, distance, variation, duration)
+
+    def move_mouse_left(
+        self,
+        distance: int,
+        *,
+        variation: int = 0,
+        duration: Optional[float | tuple[float, float]] = None,
+    ) -> "ScreenBot.Point":
+        """Move left by ``distance +/- variation`` pixels with human-like motion."""
+        return self._move_mouse_direction(-1, 0, distance, variation, duration)
+
+    def move_mouse_right(
+        self,
+        distance: int,
+        *,
+        variation: int = 0,
+        duration: Optional[float | tuple[float, float]] = None,
+    ) -> "ScreenBot.Point":
+        """Move right by ``distance +/- variation`` pixels with human-like motion."""
+        return self._move_mouse_direction(1, 0, distance, variation, duration)
 
     def click(
         self,
-        point: PointInput,
+        point: Any = None,
         *,
-        button: Button = "left",
+        button: str = "left",
         clicks: int = 1,
         interval: float = 0.0,
         duration: Optional[float] = None,
+        offset: tuple[int, int] = (0, 0),
         jitter: Optional[int] = None,
-        offset: Optional[Tuple[int, int]] = None,
         move_only: bool = False,
         dry_run: bool = False,
-        pause_after: float = 0.0,
-    ) -> Point:
-        return click(
-            point,
-            button=button,
-            clicks=clicks,
-            interval=interval,
-            duration=self.move_duration if duration is None else duration,
-            jitter=self.jitter if jitter is None else jitter,
-            offset=offset,
-            move_only=move_only,
-            dry_run=dry_run,
-            pause_after=pause_after,
-        )
+    ) -> "ScreenBot.Point":
+        """Move and click. Human-like mode adds pathing, pauses, and click dwell."""
+        base = self.mouse_position() if point is None else self._point(point)
+        radius = self.human_target_jitter if jitter is None and self.is_human_like else (jitter or 0)
+        target = base.offset(offset[0], offset[1])
+        if radius:
+            dx, dy = self._point_in_circle(radius)
+            target = target.offset(dx, dy)
+        if dry_run:
+            return target
 
-    def click_xy(self, x: int, y: int, **kwargs) -> Point:
-        return self.click(Point(x, y), **kwargs)
+        self.move_to(target, duration=duration)
+        if move_only:
+            return target
+        if self.is_human_like:
+            for index in range(self._positive_integer(clicks, "clicks")):
+                self._backend.mouseDown(button=button)
+                self._pause(self.human_click_dwell)
+                self._backend.mouseUp(button=button)
+                if index + 1 < clicks:
+                    self._sleep(self._human_interval(interval, self.human_click_dwell))
+            self._pause(self.human_pause, factor=0.5)
+        else:
+            self._backend.click(
+                x=target.x, y=target.y, clicks=clicks,
+                interval=self._non_negative(interval, "interval"), button=button,
+            )
+        return target
 
-    def click_box(self, box: BoxInput, *, padding: int = 0, **kwargs) -> Point:
-        return click_box(box, padding=padding, **self._click_kwargs(kwargs))
+    def click_xy(self, x: int, y: int, **kwargs: Any) -> "ScreenBot.Point":
+        return self.click((x, y), **kwargs)
 
-    def save_point(self, name: str, point: PointInput) -> Point:
-        return self.coords.set(name, point)
+    def click_box(self, box: Any, *, padding: int = 0, **kwargs: Any) -> "ScreenBot.Point":
+        return self.click(self._random_point_in_box(self._box(box), padding), **kwargs)
 
-    def get_point(self, name: str) -> Point:
-        return self.coords.get(name)
+    def click_grid(
+        self,
+        box: Any,
+        *,
+        columns: int = 4,
+        rows: int = 7,
+        variation: int = 0,
+        **click_kwargs: Any,
+    ) -> list["ScreenBot.Point"]:
+        """Click each grid cell once, in random order, near its center."""
+        area = self._box(box)
+        column_count = self._positive_integer(columns, "columns")
+        row_count = self._positive_integer(rows, "rows")
+        radius = self._integer_non_negative(variation, "variation")
+        if area.width < column_count or area.height < row_count:
+            raise ValueError("box must be at least one pixel per grid cell")
 
-    def click_saved(self, name: str, **kwargs) -> Point:
-        return self.click(self.coords.get(name), **kwargs)
+        cells: list[tuple[ScreenBot.Point, ScreenBot.Box]] = []
+        for row in range(row_count):
+            top = area.top + round(row * area.height / row_count)
+            bottom = area.top + round((row + 1) * area.height / row_count)
+            for column in range(column_count):
+                left = area.left + round(column * area.width / column_count)
+                right = area.left + round((column + 1) * area.width / column_count)
+                cell = self.Box(
+                    (left, top), (right, top), (right, bottom), (left, bottom)
+                )
+                cells.append((cell.center, cell))
+
+        self._random.shuffle(cells)
+        click_kwargs.setdefault("jitter", 0)
+        clicked = []
+        for center, cell in cells:
+            dx, dy = self._point_in_circle(radius) if radius else (0, 0)
+            target = self.Point(
+                min(max(center.x + dx, cell.left), cell.right - 1),
+                min(max(center.y + dy, cell.top), cell.bottom - 1),
+            )
+            clicked.append(self.click(target, **click_kwargs))
+        return clicked
+
+    def double_click(self, point: Any = None, **kwargs: Any) -> "ScreenBot.Point":
+        return self.click(point, clicks=2, **kwargs)
+
+    def right_click(self, point: Any = None, **kwargs: Any) -> "ScreenBot.Point":
+        return self.click(point, button="right", **kwargs)
+
+    def drag_to(
+        self,
+        point: Any,
+        *,
+        button: str = "left",
+        duration: Optional[float] = None,
+    ) -> "ScreenBot.Point":
+        target = self._point(point)
+        if self.is_human_like:
+            self._pause(self.human_pause)
+            self._backend.mouseDown(button=button)
+            self._pause(self.human_click_dwell)
+            self._human_move(target, duration)
+            self._pause(self.human_click_dwell)
+            self._backend.mouseUp(button=button)
+            self._pause(self.human_pause, factor=0.5)
+        else:
+            self._backend.dragTo(target.x, target.y, duration=duration or 0, button=button)
+        return target
+
+    def scroll(self, clicks: int, *, x: Optional[int] = None, y: Optional[int] = None) -> int:
+        amount = int(clicks)
+        if not self.is_human_like:
+            self._backend.scroll(amount, x=x, y=y)
+            return amount
+        self._pause(self.human_pause)
+        remaining = abs(amount)
+        direction = 1 if amount >= 0 else -1
+        while remaining:
+            chunk = min(remaining, self._random.randint(1, 3))
+            self._backend.scroll(direction * chunk, x=x, y=y)
+            remaining -= chunk
+            if remaining:
+                self._pause(self.human_scroll_pause)
+        self._pause(self.human_pause, factor=0.4)
+        return amount
+
+    def scroll_random(
+        self,
+        pixels: int,
+        *,
+        direction: str = "down",
+        variation: int = 200,
+        duration: tuple[float, float] = (2.0, 3.0),
+        pixels_per_click: int = 40,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+    ) -> int:
+        """Scroll an approximate, varied pixel distance over a varied duration."""
+        requested = self._positive_integer(pixels, "pixels")
+        spread = self._integer_non_negative(variation, "variation")
+        pixels_per_step = self._positive_integer(pixels_per_click, "pixels_per_click")
+        direction_name = str(direction).strip().lower()
+        if direction_name not in ("up", "down"):
+            raise ValueError("direction must be 'up' or 'down'")
+
+        target_pixels = self._random.randint(max(1, requested - spread), requested + spread)
+        total_clicks = max(1, round(target_pixels / pixels_per_step))
+        actual_pixels = total_clicks * pixels_per_step
+        total_duration = self._random.uniform(*self._range(duration, "scroll duration"))
+        sign = 1 if direction_name == "up" else -1
+
+        chunks: list[int] = []
+        remaining = total_clicks
+        while remaining:
+            chunk = min(remaining, self._random.randint(1, 3))
+            chunks.append(chunk)
+            remaining -= chunk
+
+        # Longer pauses at the beginning and end create acceleration and easing.
+        weights = []
+        for index in range(len(chunks)):
+            progress = (index + 1) / (len(chunks) + 1)
+            speed = 0.25 + math.sin(math.pi * progress)
+            weights.append(self._random.uniform(0.80, 1.20) / speed)
+        weight_total = sum(weights)
+
+        for chunk, weight in zip(chunks, weights):
+            self._sleep(total_duration * weight / weight_total)
+            self._backend.scroll(sign * chunk, x=x, y=y)
+
+        return actual_pixels
+
+    def scroll_down(self, pixels: int, **kwargs: Any) -> int:
+        """Scroll down by an approximate pixel distance with human-like pacing."""
+        return self.scroll_random(pixels, direction="down", **kwargs)
+
+    def scroll_up(self, pixels: int, **kwargs: Any) -> int:
+        """Scroll up by an approximate pixel distance with human-like pacing."""
+        return self.scroll_random(pixels, direction="up", **kwargs)
+
+    # Keyboard -----------------------------------------------------------
+
+    def write(self, text: str, *, interval: Optional[float] = None) -> str:
+        """Type text exactly; human-like mode only varies timing."""
+        if not self.is_human_like:
+            self._backend.write(text, interval=0 if interval is None else interval)
+            return text
+        self._pause(self.human_pause)
+        for char in text:
+            self._backend.write(char)
+            self._sleep(self._human_interval(interval, self.human_key_interval))
+        self._pause(self.human_pause, factor=0.4)
+        return text
+
+    def press(self, key: str, *, presses: int = 1, interval: Optional[float] = None) -> str:
+        count = self._positive_integer(presses, "presses")
+        if not self.is_human_like:
+            self._backend.press(key, presses=count, interval=0 if interval is None else interval)
+            return key
+        self._pause(self.human_pause)
+        for index in range(count):
+            self._backend.keyDown(key)
+            self._pause(self.human_click_dwell, factor=0.6)
+            self._backend.keyUp(key)
+            if index + 1 < count:
+                self._sleep(self._human_interval(interval, self.human_key_interval))
+        self._pause(self.human_pause, factor=0.4)
+        return key
+
+    def hold(self, key: str) -> str:
+        """Hold a key down until :meth:`release` is called for that key."""
+        self._backend.keyDown(key)
+        return key
+
+    def release(self, key: str) -> str:
+        """Release a key previously pressed with :meth:`hold`."""
+        self._backend.keyUp(key)
+        return key
+
+    def hotkey(self, *keys: str) -> tuple[str, ...]:
+        if not keys:
+            raise ValueError("hotkey requires at least one key")
+        if not self.is_human_like:
+            self._backend.hotkey(*keys)
+            return tuple(keys)
+        self._pause(self.human_pause)
+        for key in keys:
+            self._backend.keyDown(key)
+            self._pause(self.human_key_interval, factor=0.35)
+        for key in reversed(keys):
+            self._backend.keyUp(key)
+            self._pause(self.human_key_interval, factor=0.25)
+        self._pause(self.human_pause, factor=0.4)
+        return tuple(keys)
+
+    def close_window(self) -> tuple[str, str]:
+        keys = ("command" if sys.platform == "darwin" else "ctrl", "w")
+        self.hotkey(*keys)
+        return keys
+
+    def zoom_in(
+        self,
+        steps: int = 1,
+        *,
+        interval: float | tuple[float, float] = 0.0,
+    ) -> int:
+        """Zoom in by a number of application/browser zoom steps."""
+        return self._zoom("+", steps, interval)
+
+    def zoom_out(
+        self,
+        steps: int = 1,
+        *,
+        interval: float | tuple[float, float] = 0.0,
+    ) -> int:
+        """Zoom out by a number of application/browser zoom steps."""
+        return self._zoom("-", steps, interval)
+
+    # Image matching -----------------------------------------------------
 
     def locate(
         self,
-        image_path: PathInput,
+        image_path: str | Path,
         *,
         confidence: Optional[float] = None,
-        region: Optional[BoxInput] = None,
+        region: Any = None,
         grayscale: Optional[bool] = None,
         scales: Optional[Sequence[float]] = None,
         required: bool = False,
-    ) -> Optional[Match]:
-        return locate(
-            image_path,
-            confidence=self.confidence if confidence is None else confidence,
-            region=region,
-            grayscale=self.grayscale if grayscale is None else grayscale,
-            scales=self.scales if scales is None else scales,
-            required=required,
+    ) -> Optional["ScreenBot.Match"]:
+        threshold = self.confidence if confidence is None else self._confidence(confidence)
+        match = self._locate_once(
+            image_path, threshold, region,
+            self.grayscale if grayscale is None else grayscale,
+            self.scales if scales is None else self._validate_scales(scales),
         )
+        if match is None and required:
+            raise self.ImageNotFound(
+                f"Could not find {str(image_path)!r} at confidence >= {threshold:.2f}"
+            )
+        return match
 
     def locate_all(
         self,
-        image_path: PathInput,
+        image_path: str | Path,
         *,
         confidence: Optional[float] = None,
-        region: Optional[BoxInput] = None,
+        region: Any = None,
         grayscale: Optional[bool] = None,
         scales: Optional[Sequence[float]] = None,
-        limit: int = 10,
-    ) -> List[Match]:
-        return locate_all(
-            image_path,
-            confidence=self.confidence if confidence is None else confidence,
-            region=region,
-            grayscale=self.grayscale if grayscale is None else grayscale,
-            scales=self.scales if scales is None else scales,
-            limit=limit,
+        limit: Optional[int] = 10,
+    ) -> list["ScreenBot.Match"]:
+        threshold = self.confidence if confidence is None else self._confidence(confidence)
+        return self._locate_all_once(
+            image_path, threshold, region,
+            self.grayscale if grayscale is None else grayscale,
+            self.scales if scales is None else self._validate_scales(scales),
+            None if limit is None else self._positive_integer(limit, "limit"),
+        )
+
+    def count_images(
+        self,
+        image_paths: Sequence[str | Path],
+        *,
+        confidence: Optional[float] = None,
+        region: Any = None,
+        grayscale: Optional[bool] = None,
+        scales: Optional[Sequence[float]] = None,
+    ) -> int:
+        """Return the total number of visible matches for all image templates."""
+        return sum(
+            len(self.locate_all(
+                image_path,
+                confidence=confidence,
+                region=region,
+                grayscale=grayscale,
+                scales=scales,
+                limit=None,
+            ))
+            for image_path in image_paths
         )
 
     def wait_for(
         self,
-        image_path: PathInput,
+        image_path: str | Path,
         *,
         confidence: Optional[float] = None,
         timeout: Optional[float] = None,
         interval: Optional[float] = None,
-        region: Optional[BoxInput] = None,
+        region: Any = None,
         grayscale: Optional[bool] = None,
         scales: Optional[Sequence[float]] = None,
         required: bool = True,
-    ) -> Optional[Match]:
-        return wait_for(
-            image_path,
-            confidence=self.confidence if confidence is None else confidence,
-            timeout=self.timeout if timeout is None else timeout,
-            interval=self.interval if interval is None else interval,
-            region=region,
-            grayscale=self.grayscale if grayscale is None else grayscale,
-            scales=self.scales if scales is None else scales,
-            required=required,
-        )
+    ) -> Optional["ScreenBot.Match"]:
+        wait = self.timeout if timeout is None else self._non_negative(timeout, "timeout")
+        poll = self.poll_interval if interval is None else self._non_negative(interval, "interval")
+        deadline = time.monotonic() + wait
+        while True:
+            match = self.locate(
+                image_path, confidence=confidence, region=region,
+                grayscale=grayscale, scales=scales, required=False,
+            )
+            if match is not None:
+                return match
+            if wait <= 0 or time.monotonic() >= deadline:
+                if required:
+                    raise self.ImageNotFound(f"Timed out after {wait:.2f}s waiting for {str(image_path)!r}")
+                return None
+            self._sleep(poll)
 
     def click_image(
         self,
-        image_path: PathInput,
+        image_path: str | Path,
         *,
         confidence: Optional[float] = None,
         timeout: Optional[float] = None,
         interval: Optional[float] = None,
-        region: Optional[BoxInput] = None,
+        region: Any = None,
         grayscale: Optional[bool] = None,
         scales: Optional[Sequence[float]] = None,
-        jitter: Optional[int] = None,
         required: bool = True,
-        **click_kwargs,
-    ) -> Optional[Match]:
-        match = wait_for(
-            image_path,
-            confidence=self.confidence if confidence is None else confidence,
-            timeout=self.timeout if timeout is None else timeout,
-            interval=self.interval if interval is None else interval,
-            region=region,
-            grayscale=self.grayscale if grayscale is None else grayscale,
-            scales=self.scales if scales is None else scales,
-            required=required,
+        random_point: Optional[bool] = None,
+        padding: Optional[int] = None,
+        **click_kwargs: Any,
+    ) -> Optional["ScreenBot.Match"]:
+        """Find and click an image; human-like mode defaults to an interior point."""
+        match = self.wait_for(
+            image_path, confidence=confidence, timeout=timeout, interval=interval,
+            region=region, grayscale=grayscale, scales=scales, required=required,
         )
         if match is None:
             return None
-        self.click(match.center, jitter=self.jitter if jitter is None else jitter, **click_kwargs)
+        use_random = self.is_human_like if random_point is None else random_point
+        if use_random:
+            pad = self.human_image_padding if padding is None else padding
+            target = self._random_point_in_box(match.box, pad)
+        else:
+            target = match.center
+        self.click(target, **click_kwargs)
         return match
 
-    # Compatibility with the previous method names.
-    def locate_image(self, image_path: PathInput, options: Optional[MatchOptions] = None, **kwargs) -> Optional[Match]:
-        if options is None:
-            return self.locate(image_path, **kwargs)
-        match_kwargs, _ = _options_to_kwargs(options, None)
-        if "timeout" in match_kwargs:
-            return wait_for(image_path, **match_kwargs)
-        return locate(image_path, **match_kwargs)
+    def click_random_in_image(self, image_path: str | Path, **kwargs: Any) -> Optional["ScreenBot.Match"]:
+        kwargs["random_point"] = True
+        return self.click_image(image_path, **kwargs)
 
-    def locate_all_images(
+    def click_all_images(
         self,
-        image_path: PathInput,
-        options: Optional[MatchOptions] = None,
+        image_path: str | Path,
         *,
-        max_results: int = 10,
-        **kwargs,
-    ) -> List[Match]:
-        if options is None:
-            return self.locate_all(image_path, limit=max_results, **kwargs)
-        match_kwargs, _ = _options_to_kwargs(options, None)
-        match_kwargs.pop("timeout", None)
-        match_kwargs.pop("interval", None)
-        return locate_all(image_path, limit=max_results, **match_kwargs)
-
-    def wait_for_image(self, image_path: PathInput, options: Optional[MatchOptions] = None, **kwargs) -> Optional[Match]:
-        if options is None:
-            return self.wait_for(image_path, **kwargs)
-        match_kwargs, _ = _options_to_kwargs(options, None)
-        match_kwargs.setdefault("timeout", 10.0)
-        return wait_for(image_path, **match_kwargs)
-
-    click_point = click
-
-    def _click_kwargs(self, kwargs: Dict[str, object]) -> Dict[str, object]:
-        kwargs = dict(kwargs)
-        kwargs.setdefault("duration", self.move_duration)
-        kwargs.setdefault("jitter", self.jitter)
-        return kwargs
-
-
-# ---------------------------------------------------------------------------
-# Public functional API
-# ---------------------------------------------------------------------------
-
-
-def screen_size() -> Tuple[int, int]:
-    size = pyautogui.size()
-    return int(size.width), int(size.height)
-
-
-def screenshot(region: Optional[BoxInput] = None) -> Image.Image:
-    if region is None:
-        return pyautogui.screenshot()
-    box = Box.from_value(region)
-    return pyautogui.screenshot(region=box.as_tuple())
-
-
-def save_screenshot(path: PathInput, region: Optional[BoxInput] = None) -> Path:
-    out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    screenshot(region).save(out)
-    return out
-
-
-def capture_template(path: PathInput, box: BoxInput) -> Path:
-    """Save a screenshot region as an image template for later matching."""
-
-    return save_screenshot(path, Box.from_value(box))
-
-
-def move_to(point: PointInput, *, duration: float = 0.0) -> Point:
-    p = Point.from_value(point)
-    pyautogui.moveTo(p.x, p.y, duration=duration)
-    return p
-
-
-def click(
-    point: PointInput,
-    *,
-    button: Button = "left",
-    clicks: int = 1,
-    interval: float = 0.0,
-    duration: float = 0.0,
-    jitter: int = 0,
-    offset: Optional[Tuple[int, int]] = None,
-    move_only: bool = False,
-    dry_run: bool = False,
-    pause_after: float = 0.0,
-) -> Point:
-    """Move to a point and click it.
-
-    Set ``jitter`` to vary the final point randomly inside a small radius.
-    Set ``dry_run=True`` to calculate the final point without moving the mouse.
-    """
-
-    target = _final_click_point(Point.from_value(point), offset=offset, jitter=jitter)
-
-    if dry_run:
-        return target
-
-    pyautogui.moveTo(target.x, target.y, duration=duration)
-    if not move_only:
-        pyautogui.click(
-            x=target.x,
-            y=target.y,
-            clicks=clicks,
-            interval=interval,
-            button=button,
-        )
-    if pause_after > 0:
-        time.sleep(pause_after)
-    return target
-
-
-def click_box(box: BoxInput, *, padding: int = 0, **click_kwargs) -> Point:
-    """Click a random point inside a box."""
-
-    target = Box.from_value(box).random_point(padding=padding)
-    return click(target, **click_kwargs)
-
-
-def locate(
-    image_path: PathInput,
-    *,
-    confidence: float = 0.80,
-    region: Optional[BoxInput] = None,
-    grayscale: bool = True,
-    scales: Sequence[float] = (1.0,),
-    required: bool = False,
-) -> Optional[Match]:
-    """Find an image on screen once.
-
-    Returns ``Match`` when found. Returns ``None`` when missing unless
-    ``required=True`` is passed.
-    """
-
-    match = _locate_once(
-        image_path,
-        confidence=confidence,
-        region=region,
-        grayscale=grayscale,
-        scales=scales,
-    )
-    if match is None and required:
-        raise ImageNotFound(
-            f"Could not find image {str(image_path)!r} at confidence >= {confidence:.2f}"
-        )
-    return match
-
-
-def locate_all(
-    image_path: PathInput,
-    *,
-    confidence: float = 0.80,
-    region: Optional[BoxInput] = None,
-    grayscale: bool = True,
-    scales: Sequence[float] = (1.0,),
-    limit: int = 10,
-) -> List[Match]:
-    """Find up to ``limit`` matching instances of an image on screen."""
-
-    return _locate_all_once(
-        image_path,
-        confidence=confidence,
-        region=region,
-        grayscale=grayscale,
-        scales=scales,
-        limit=limit,
-    )
-
-
-def wait_for(
-    image_path: PathInput,
-    *,
-    confidence: float = 0.80,
-    timeout: float = 10.0,
-    interval: float = 0.25,
-    region: Optional[BoxInput] = None,
-    grayscale: bool = True,
-    scales: Sequence[float] = (1.0,),
-    required: bool = True,
-) -> Optional[Match]:
-    """Keep looking for an image until it appears or timeout expires."""
-
-    deadline = time.time() + max(0.0, timeout)
-
-    while True:
-        match = locate(
+        confidence: Optional[float] = None,
+        region: Any = None,
+        grayscale: Optional[bool] = None,
+        scales: Optional[Sequence[float]] = None,
+        limit: Optional[int] = None,
+        variation: int = 5,
+        **click_kwargs: Any,
+    ) -> list["ScreenBot.Point"]:
+        """Click every visible match in random order near each match's center."""
+        radius = self._integer_non_negative(variation, "variation")
+        matches = self.locate_all(
             image_path,
             confidence=confidence,
             region=region,
             grayscale=grayscale,
             scales=scales,
-            required=False,
+            limit=limit,
         )
-        if match is not None:
-            return match
-
-        if timeout <= 0 or time.time() >= deadline:
-            if required:
-                raise ImageNotFound(
-                    f"Timed out after {timeout:.2f}s waiting for {str(image_path)!r} "
-                    f"at confidence >= {confidence:.2f}"
-                )
-            return None
-
-        time.sleep(max(0.0, interval))
-
-
-def click_image(
-    image_path: PathInput,
-    *,
-    confidence: float = 0.80,
-    timeout: float = 0.0,
-    interval: float = 0.25,
-    region: Optional[BoxInput] = None,
-    grayscale: bool = True,
-    scales: Sequence[float] = (1.0,),
-    jitter: int = 0,
-    required: bool = True,
-    **click_kwargs,
-) -> Optional[Match]:
-    """Find an image on screen and click its center."""
-
-    if timeout > 0:
-        match = wait_for(
-            image_path,
-            confidence=confidence,
-            timeout=timeout,
-            interval=interval,
-            region=region,
-            grayscale=grayscale,
-            scales=scales,
-            required=required,
-        )
-    else:
-        match = locate(
-            image_path,
-            confidence=confidence,
-            region=region,
-            grayscale=grayscale,
-            scales=scales,
-            required=required,
-        )
-
-    if match is None:
-        return None
-
-    click(match.center, jitter=jitter, **click_kwargs)
-    return match
-
-
-_DEFAULT_STORE = CoordinateStore()
-
-
-def save_point(name: str, point: PointInput, *, file: PathInput = "screenbot_coords.json") -> Point:
-    """Save a named coordinate."""
-
-    store = _DEFAULT_STORE if file == "screenbot_coords.json" else CoordinateStore(file)
-    return store.set(name, point)
-
-
-def click_saved(name: str, *, file: PathInput = "screenbot_coords.json", **click_kwargs) -> Point:
-    """Click a previously saved coordinate."""
-
-    store = _DEFAULT_STORE if file == "screenbot_coords.json" else CoordinateStore(file)
-    return click(store.get(name), **click_kwargs)
-
-
-# ---------------------------------------------------------------------------
-# Backward-compatible Go-style API
-# ---------------------------------------------------------------------------
-
-
-def _options_to_kwargs(
-    match_options: Optional[MatchOptions], click_options: Optional[ClickOptions]
-) -> Tuple[Dict[str, object], Dict[str, object]]:
-    match_kwargs: Dict[str, object] = {}
-    click_kwargs: Dict[str, object] = {}
-
-    if match_options is not None:
-        match_kwargs = {
-            "confidence": match_options.confidence,
-            "region": match_options.region,
-            "grayscale": match_options.grayscale,
-            "scales": match_options.scales,
-            "required": match_options.raise_on_missing,
-        }
-        if match_options.timeout:
-            match_kwargs["timeout"] = match_options.timeout
-            match_kwargs["interval"] = match_options.interval
-
-    if click_options is not None:
-        click_kwargs = {
-            "button": click_options.button,
-            "clicks": click_options.clicks,
-            "interval": click_options.interval,
-            "duration": click_options.duration,
-            "offset": click_options.offset,
-            "jitter": click_options.offset_radius,
-            "move_only": click_options.move_only,
-            "dry_run": click_options.dry_run,
-            "pause_after": click_options.pause_after,
-        }
-
-    return match_kwargs, click_kwargs
-
-
-def ClickImage(
-    image_path: PathInput,
-    match_options: Optional[MatchOptions] = None,
-    click_options: Optional[ClickOptions] = None,
-) -> Optional[Match]:
-    match_kwargs, click_kwargs = _options_to_kwargs(match_options, click_options)
-    return click_image(image_path, **match_kwargs, **click_kwargs)
-
-
-def LocateImage(
-    image_path: PathInput,
-    match_options: Optional[MatchOptions] = None,
-) -> Optional[Match]:
-    match_kwargs, _ = _options_to_kwargs(match_options, None)
-    if "timeout" in match_kwargs:
-        return wait_for(image_path, **match_kwargs)
-    return locate(image_path, **match_kwargs)
-
-
-def WaitForImage(
-    image_path: PathInput,
-    match_options: Optional[MatchOptions] = None,
-) -> Optional[Match]:
-    match_kwargs, _ = _options_to_kwargs(match_options, None)
-    if "timeout" not in match_kwargs:
-        match_kwargs["timeout"] = 10.0
-    return wait_for(image_path, **match_kwargs)
-
-
-# ---------------------------------------------------------------------------
-# Internals
-# ---------------------------------------------------------------------------
-
-
-def _final_click_point(
-    point: Point,
-    *,
-    offset: Optional[Tuple[int, int]],
-    jitter: int,
-) -> Point:
-    x, y = point.x, point.y
-
-    if offset is not None:
-        x += int(offset[0])
-        y += int(offset[1])
-
-    if jitter > 0:
-        dx, dy = _random_point_in_circle(jitter)
-        x += dx
-        y += dy
-
-    return Point(int(round(x)), int(round(y)))
-
-
-def _random_point_in_circle(radius: int) -> Tuple[int, int]:
-    angle = random.uniform(0, math.tau)
-    distance = radius * math.sqrt(random.random())
-    return int(round(math.cos(angle) * distance)), int(round(math.sin(angle) * distance))
-
-
-def _load_template(path: PathInput, grayscale: bool):
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"Template image not found: {p}")
-
-    flags = cv2.IMREAD_GRAYSCALE if grayscale else cv2.IMREAD_COLOR
-    data = np.fromfile(str(p), dtype=np.uint8)
-    template = cv2.imdecode(data, flags)
-    if template is None:
-        raise ValueError(f"Could not read template image: {p}")
-    return template
-
-
-def _screenshot_cv(region: Optional[Box], grayscale: bool):
-    img = screenshot(region)
-    arr = np.array(img)
-
-    if grayscale:
-        if arr.ndim == 2:
-            return arr, img.size
-        if arr.shape[2] == 4:
-            return cv2.cvtColor(arr, cv2.COLOR_RGBA2GRAY), img.size
-        return cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY), img.size
-
-    if arr.ndim == 2:
-        arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
-    elif arr.shape[2] == 4:
-        arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-    else:
-        arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-    return arr, img.size
-
-
-def _coord_scale(region: Optional[Box], screenshot_size: Tuple[int, int]) -> Tuple[float, float]:
-    """Map screenshot pixels back to PyAutoGUI logical screen coordinates."""
-
-    if region is not None:
-        expected_width, expected_height = region.width, region.height
-    else:
-        expected_width, expected_height = screen_size()
-
-    sx = screenshot_size[0] / max(1, expected_width)
-    sy = screenshot_size[1] / max(1, expected_height)
-    return sx or 1.0, sy or 1.0
-
-
-def _scale_template(template, scale: float):
-    if scale == 1.0:
-        return template
-
-    height, width = template.shape[:2]
-    scaled_width = max(1, int(round(width * scale)))
-    scaled_height = max(1, int(round(height * scale)))
-    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
-    return cv2.resize(template, (scaled_width, scaled_height), interpolation=interpolation)
-
-
-def _locate_once(
-    image_path: PathInput,
-    *,
-    confidence: float,
-    region: Optional[BoxInput],
-    grayscale: bool,
-    scales: Sequence[float],
-) -> Optional[Match]:
-    search_region = None if region is None else Box.from_value(region)
-    screen_img, shot_size = _screenshot_cv(search_region, grayscale)
-    template_original = _load_template(image_path, grayscale)
-    sx, sy = _coord_scale(search_region, shot_size)
-
-    best: Optional[Match] = None
-
-    for scale in scales:
-        if scale <= 0:
-            continue
-
-        template = _scale_template(template_original, scale)
-        template_height, template_width = template.shape[:2]
-        screen_height, screen_width = screen_img.shape[:2]
-
-        if template_width > screen_width or template_height > screen_height:
-            continue
-
-        scores = cv2.matchTemplate(screen_img, template, cv2.TM_CCOEFF_NORMED)
-        _, max_score, _, max_loc = cv2.minMaxLoc(scores)
-
-        if max_score < confidence:
-            continue
-
-        local_x, local_y = max_loc
-        abs_x = int(round((search_region.x if search_region else 0) + local_x / sx))
-        abs_y = int(round((search_region.y if search_region else 0) + local_y / sy))
-        result_width = int(round(template_width / sx))
-        result_height = int(round(template_height / sy))
-
-        candidate = Match(
-            x=abs_x,
-            y=abs_y,
-            width=result_width,
-            height=result_height,
-            confidence=float(max_score),
-            image_path=str(image_path),
-            scale=float(scale),
-        )
-
-        if best is None or candidate.confidence > best.confidence:
-            best = candidate
-
-    return best
-
-
-def _locate_all_once(
-    image_path: PathInput,
-    *,
-    confidence: float,
-    region: Optional[BoxInput],
-    grayscale: bool,
-    scales: Sequence[float],
-    limit: int,
-) -> List[Match]:
-    search_region = None if region is None else Box.from_value(region)
-    screen_img, shot_size = _screenshot_cv(search_region, grayscale)
-    template_original = _load_template(image_path, grayscale)
-    sx, sy = _coord_scale(search_region, shot_size)
-
-    results: List[Match] = []
-
-    for scale in scales:
-        if scale <= 0:
-            continue
-
-        template = _scale_template(template_original, scale)
-        template_height, template_width = template.shape[:2]
-        screen_height, screen_width = screen_img.shape[:2]
-
-        if template_width > screen_width or template_height > screen_height:
-            continue
-
-        scores = cv2.matchTemplate(screen_img, template, cv2.TM_CCOEFF_NORMED)
-        ys, xs = np.where(scores >= confidence)
-
-        for local_x, local_y in zip(xs.tolist(), ys.tolist()):
-            abs_x = int(round((search_region.x if search_region else 0) + local_x / sx))
-            abs_y = int(round((search_region.y if search_region else 0) + local_y / sy))
-            result_width = int(round(template_width / sx))
-            result_height = int(round(template_height / sy))
-
-            results.append(
-                Match(
-                    x=abs_x,
-                    y=abs_y,
-                    width=result_width,
-                    height=result_height,
-                    confidence=float(scores[local_y, local_x]),
-                    image_path=str(image_path),
-                    scale=float(scale),
-                )
+        self._random.shuffle(matches)
+
+        # The requested radius is the complete spatial variation for this API.
+        click_kwargs.setdefault("jitter", 0)
+        clicked = []
+        for match in matches:
+            target = self._point_near_center(match.box, radius)
+            clicked.append(self.click(target, **click_kwargs))
+        return clicked
+
+    # Named coordinates and utility -------------------------------------
+
+    def save_point(self, name: str, point: Any) -> "ScreenBot.Point":
+        points = self._load_points()
+        value = self._point(point)
+        points[name] = value
+        self.coordinate_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {key: item.as_tuple() for key, item in sorted(points.items())}
+        self.coordinate_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        return value
+
+    def get_point(self, name: str) -> "ScreenBot.Point":
+        points = self._load_points()
+        if name not in points:
+            raise KeyError(f"No saved point named {name!r}")
+        return points[name]
+
+    def delete_point(self, name: str) -> bool:
+        points = self._load_points()
+        existed = points.pop(name, None) is not None
+        payload = {key: item.as_tuple() for key, item in sorted(points.items())}
+        self.coordinate_file.parent.mkdir(parents=True, exist_ok=True)
+        self.coordinate_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        return existed
+
+    def list_points(self) -> dict[str, "ScreenBot.Point"]:
+        return self._load_points()
+
+    def click_saved(self, name: str, **kwargs: Any) -> "ScreenBot.Point":
+        return self.click(self.get_point(name), **kwargs)
+
+    def save_position_file(self, path: str | Path, point: Any) -> "ScreenBot.Point":
+        """Save one position as a standalone JSON file."""
+        value = self._point(point)
+        self._write_coordinate_file(path, {"x": value.x, "y": value.y})
+        return value
+
+    def load_position_file(self, path: str | Path) -> "ScreenBot.Point":
+        """Load a position previously saved with :meth:`save_position_file`."""
+        return self._point_from_file(path)
+
+    def save_box_file(self, path: str | Path, box: Any) -> "ScreenBot.Box":
+        """Save one box as a standalone JSON file."""
+        value = self._box(box)
+        self._write_coordinate_file(path, {
+            "left": value.left,
+            "top": value.top,
+            "right": value.right,
+            "bottom": value.bottom,
+        })
+        return value
+
+    def load_box_file(self, path: str | Path) -> "ScreenBot.Box":
+        """Load a box previously saved with :meth:`save_box_file`."""
+        return self._box_from_file(path)
+
+    def countdown(self, seconds: int = 3, *, message: str = "Starting in") -> None:
+        for remaining in range(max(0, int(seconds)), 0, -1):
+            print(f"{message} {remaining}...")
+            self._sleep(1)
+        print("Go!")
+
+    def wait(self, seconds: float) -> float:
+        """Wait for an exact number of seconds and return that duration."""
+        duration = self._non_negative(seconds, "seconds")
+        self._sleep(duration)
+        return duration
+
+    def wait_random(self, minimum: float, maximum: float) -> float:
+        """Wait for a random duration in the inclusive range and return it."""
+        duration = self._random.uniform(*self._range((minimum, maximum), "wait range"))
+        self._sleep(duration)
+        return duration
+
+    def print_pos_on_click(self) -> None:
+        """Print every left-click position until interrupted with Ctrl+C."""
+        print("Click anywhere to print its position. Press Ctrl+C to stop.")
+
+        def on_click(x: int, y: int, button: Any, pressed: bool) -> None:
+            if pressed and button == mouse.Button.left:
+                print(f"({int(x)}, {int(y)})", flush=True)
+
+        with mouse.Listener(on_click=on_click) as listener:
+            listener.join()
+
+    def capture_box_on_key(self, *, announce: bool = True) -> "ScreenBot.Box":
+        """Return the bounding box of four pointer positions marked with 0."""
+        points: list[ScreenBot.Point] = []
+        if announce:
+            print(
+                "Move the pointer to each corner and press 0 four times.",
+                file=sys.stderr,
+                flush=True,
             )
 
-    results.sort(key=lambda result: result.confidence, reverse=True)
-    return _non_max_suppress(results, limit=limit)
+        def on_press(key: Any) -> Optional[bool]:
+            if getattr(key, "char", None) != "0":
+                return None
+            point = self.mouse_position()
+            points.append(point)
+            if announce:
+                print(
+                    f"Point {len(points)}: {point.as_tuple()}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return False if len(points) == 4 else None
 
+        with keyboard.Listener(on_press=on_press) as listener:
+            listener.join()
 
-def _non_max_suppress(results: List[Match], *, limit: int) -> List[Match]:
-    kept: List[Match] = []
-    for result in results:
-        if all(_iou(result.box, other.box) < 0.35 for other in kept):
-            kept.append(result)
-            if len(kept) >= limit:
-                break
-    return kept
+        left = min(point.x for point in points)
+        right = max(point.x for point in points)
+        top = min(point.y for point in points)
+        bottom = max(point.y for point in points)
+        return self.Box(
+            (left, top),
+            (right, top),
+            (right, bottom),
+            (left, bottom),
+        )
 
+    def capture_box_on_click(self, *, announce: bool = True) -> "ScreenBot.Box":
+        """Compatibility alias for :meth:`capture_box_on_key`."""
+        return self.capture_box_on_key(announce=announce)
 
-def _iou(a: Box, b: Box) -> float:
-    x1 = max(a.left, b.left)
-    y1 = max(a.top, b.top)
-    x2 = min(a.right, b.right)
-    y2 = min(a.bottom, b.bottom)
+    def print_box_on_key(self) -> "ScreenBot.Box":
+        """Capture four pointer positions marked with 0 and print their box."""
+        box = self.capture_box_on_key()
+        print(
+            "ScreenBot.Box(\n"
+            f"    ({box.left}, {box.top}),\n"
+            f"    ({box.right}, {box.top}),\n"
+            f"    ({box.right}, {box.bottom}),\n"
+            f"    ({box.left}, {box.bottom}),\n"
+            ")",
+            flush=True,
+        )
+        return box
 
-    intersection_width = max(0, x2 - x1)
-    intersection_height = max(0, y2 - y1)
-    intersection = intersection_width * intersection_height
-    union = a.width * a.height + b.width * b.height - intersection
-    return intersection / union if union else 0.0
+    def print_box_on_click(self) -> "ScreenBot.Box":
+        """Compatibility alias for :meth:`print_box_on_key`."""
+        return self.print_box_on_key()
+
+    # Internals ----------------------------------------------------------
+
+    def _move_mouse_direction(
+        self,
+        x_direction: int,
+        y_direction: int,
+        distance: int,
+        variation: int,
+        duration: Optional[float | tuple[float, float]],
+    ) -> "ScreenBot.Point":
+        requested = self._integer_non_negative(distance, "distance")
+        spread = self._integer_non_negative(variation, "variation")
+        actual_distance = self._random.randint(max(0, requested - spread), requested + spread)
+        start = self.mouse_position()
+        width, height = self.screen_size()
+        target = self.Point(
+            min(max(0, start.x + x_direction * actual_distance), max(0, width - 1)),
+            min(max(0, start.y + y_direction * actual_distance), max(0, height - 1)),
+        )
+
+        if isinstance(duration, tuple):
+            move_duration = self._random.uniform(*self._range(duration, "duration"))
+        elif duration is None:
+            move_duration = None
+        else:
+            move_duration = self._non_negative(duration, "duration")
+
+        self._pause(self.human_pause)
+        self._human_move(target, move_duration)
+        self._pause(self.human_pause, factor=0.35)
+        return target
+
+    def _zoom(
+        self,
+        key: str,
+        steps: int,
+        interval: float | tuple[float, float],
+    ) -> int:
+        count = self._positive_integer(steps, "steps")
+        if isinstance(interval, tuple):
+            delay_range = self._range(interval, "interval")
+        else:
+            delay = self._non_negative(interval, "interval")
+            delay_range = (delay, delay)
+
+        modifier = "command" if sys.platform == "darwin" else "ctrl"
+        for index in range(count):
+            self.hotkey(modifier, key)
+            if index + 1 < count:
+                self._sleep(self._random.uniform(*delay_range))
+        return count
+
+    def _human_move(self, target: "ScreenBot.Point", duration: Optional[float]) -> None:
+        start = self.mouse_position()
+        total = self._random.uniform(*self.human_move_duration) if duration is None else self._non_negative(duration, "duration")
+        distance = math.hypot(target.x - start.x, target.y - start.y)
+        if distance == 0:
+            return
+        steps = max(2, min(120, round(max(total * 60, distance / 12))))
+        dx, dy = target.x - start.x, target.y - start.y
+        normal_x, normal_y = -dy / distance, dx / distance
+        waypoint_count = self._random.randint(2, 4)
+        waypoints: list[tuple[float, float]] = [(start.x, start.y)]
+        side = self._random.choice((-1, 1))
+        for index in range(1, waypoint_count + 1):
+            progress = index / (waypoint_count + 1)
+            progress += self._random.uniform(-0.10, 0.10) / waypoint_count
+            deviation = distance * self._random.uniform(*self.human_path_deviation)
+            deviation *= side * self._random.uniform(0.55, 1.0)
+            waypoints.append((
+                start.x + dx * progress + normal_x * deviation,
+                start.y + dy * progress + normal_y * deviation,
+            ))
+            if self._random.random() < 0.55:
+                side *= -1
+
+        if self._random.random() < self.human_overshoot_chance and distance >= 20:
+            overshoot = self._random.uniform(0.04, 0.16)
+            correction = distance * self._random.uniform(0.03, 0.12) * self._random.choice((-1, 1))
+            waypoints.append((
+                target.x + dx * overshoot + normal_x * correction,
+                target.y + dy * overshoot + normal_y * correction,
+            ))
+        waypoints.append((target.x, target.y))
+
+        path: list[tuple[float, float]] = []
+        segment_count = len(waypoints) - 1
+        for segment in range(segment_count):
+            p0 = waypoints[max(0, segment - 1)]
+            p1 = waypoints[segment]
+            p2 = waypoints[segment + 1]
+            p3 = waypoints[min(len(waypoints) - 1, segment + 2)]
+            segment_steps = max(1, round(steps / segment_count))
+            for index in range(1, segment_steps + 1):
+                t = index / segment_steps
+                t2, t3 = t * t, t * t * t
+                x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t +
+                           (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+                           (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+                y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t +
+                           (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+                           (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+                path.append((x, y))
+        path[-1] = (target.x, target.y)
+
+        # Pace changes persist for several samples instead of becoming jittery noise.
+        speeds: list[float] = []
+        current_speed = self._random.uniform(*self.human_speed_variation)
+        desired_speed = current_speed
+        change_after = self._random.randint(3, 9)
+        for index in range(len(path)):
+            if index >= change_after:
+                desired_speed = self._random.uniform(*self.human_speed_variation)
+                change_after = index + self._random.randint(3, 9)
+            current_speed += (desired_speed - current_speed) * 0.35
+            progress = (index + 1) / len(path)
+            acceleration = 0.28 + math.sin(math.pi * progress) ** 0.65
+            speeds.append(max(0.01, current_speed * acceleration))
+        weights = [1 / speed for speed in speeds]
+        weight_total = sum(weights)
+
+        for index, ((x, y), weight) in enumerate(zip(path, weights)):
+            if index + 1 < len(path):
+                x += self._random.uniform(-1.2, 1.2)
+                y += self._random.uniform(-1.2, 1.2)
+            self._backend.moveTo(round(x), round(y), duration=0)
+            if total:
+                self._sleep(total * weight / weight_total)
+
+    def _locate_once(self, path: str | Path, confidence: float, region: Any, grayscale: bool, scales: Sequence[float]) -> Optional["ScreenBot.Match"]:
+        search_region = None if region is None else self._box(region)
+        display_scale = self._get_display_scale()
+        template = self._load_template(path)
+        try:
+            for scale in scales:
+                candidate = self._scale_template(template, scale)
+                try:
+                    box = self._backend.locateOnScreen(
+                        candidate,
+                        confidence=confidence,
+                        grayscale=grayscale,
+                        region=self._capture_region(search_region, display_scale),
+                    )
+                except (pyautogui.ImageNotFoundException, pyscreeze.ImageNotFoundException):
+                    box = None
+                finally:
+                    if candidate is not template:
+                        candidate.close()
+                if box is not None:
+                    return self._match(path, box, confidence, scale, display_scale)
+            return None
+        finally:
+            template.close()
+
+    def _locate_all_once(self, path: str | Path, confidence: float, region: Any, grayscale: bool, scales: Sequence[float], limit: Optional[int]) -> list["ScreenBot.Match"]:
+        search_region = None if region is None else self._box(region)
+        display_scale = self._get_display_scale()
+        template = self._load_template(path)
+        results = []
+        try:
+            for scale in scales:
+                candidate = self._scale_template(template, scale)
+                try:
+                    boxes = self._backend.locateAllOnScreen(
+                        candidate,
+                        confidence=confidence,
+                        grayscale=grayscale,
+                        region=self._capture_region(search_region, display_scale),
+                    )
+                    results.extend(
+                        self._match(path, box, confidence, scale, display_scale)
+                        for box in boxes
+                    )
+                except (pyautogui.ImageNotFoundException, pyscreeze.ImageNotFoundException):
+                    continue
+                finally:
+                    if candidate is not template:
+                        candidate.close()
+        finally:
+            template.close()
+
+        kept = []
+        for result in results:
+            if all(self._iou(result.box, other.box) < 0.35 for other in kept):
+                kept.append(result)
+                if limit is not None and len(kept) == limit:
+                    break
+        return kept
+
+    @staticmethod
+    def _match(
+        path: str | Path,
+        box: Any,
+        confidence: float,
+        scale: float,
+        display_scale: tuple[float, float] = (1.0, 1.0),
+    ) -> "ScreenBot.Match":
+        scale_x, scale_y = display_scale
+        return ScreenBot.Match(
+            round(box.left / scale_x), round(box.top / scale_y),
+            round(box.width / scale_x), round(box.height / scale_y),
+            float(confidence), str(path), float(scale),
+        )
+
+    def _get_display_scale(self) -> tuple[float, float]:
+        """Return capture pixels per mouse-coordinate unit.
+
+        macOS Retina screenshots can be twice the dimensions reported by the
+        mouse API. PyAutoGUI's image matcher returns screenshot coordinates,
+        while its input methods require the smaller logical coordinates.
+        """
+        if self._display_scale is not None:
+            return self._display_scale
+        if self._backend is not pyautogui:
+            self._display_scale = (1.0, 1.0)
+            return self._display_scale
+
+        logical_width, logical_height = self.screen_size()
+        capture_width, capture_height = self._backend.screenshot().size
+        self._display_scale = (
+            capture_width / logical_width if logical_width else 1.0,
+            capture_height / logical_height if logical_height else 1.0,
+        )
+        return self._display_scale
+
+    @staticmethod
+    def _capture_region(
+        region: Optional["ScreenBot.Box"],
+        display_scale: tuple[float, float],
+    ) -> Optional[tuple[int, int, int, int]]:
+        if region is None:
+            return None
+        scale_x, scale_y = display_scale
+        return (
+            round(region.x * scale_x),
+            round(region.y * scale_y),
+            round(region.width * scale_x),
+            round(region.height * scale_y),
+        )
+
+    @staticmethod
+    def _load_template(path: str | Path) -> Image.Image:
+        source = Path(path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Template image not found: {source}")
+        try:
+            with Image.open(source) as image:
+                image.load()
+                return image.copy()
+        except (OSError, ValueError) as error:
+            raise ValueError(f"Could not read template image: {source}") from error
+
+    @staticmethod
+    def _scale_template(template: Image.Image, scale: float) -> Image.Image:
+        if scale == 1:
+            return template
+        width, height = template.size
+        resampling = Image.Resampling.LANCZOS if scale < 1 else Image.Resampling.BICUBIC
+        return template.resize(
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            resampling,
+        )
+
+    def _load_points(self) -> dict[str, "ScreenBot.Point"]:
+        if not self.coordinate_file.exists():
+            return {}
+        raw = json.loads(self.coordinate_file.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError(f"Coordinate file must contain a JSON object: {self.coordinate_file}")
+        return {str(name): self._point(value) for name, value in raw.items()}
+
+    @staticmethod
+    def _write_coordinate_file(path: str | Path, payload: dict[str, int]) -> None:
+        output = Path(path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _color_counts(image: Image.Image) -> list["ScreenBot.ColorCount"]:
+        rgb = image.convert("RGB")
+        try:
+            counts = Counter(rgb.get_flattened_data())
+        finally:
+            rgb.close()
+        total = sum(counts.values())
+        return [
+            ScreenBot.ColorCount(
+                tuple(int(channel) for channel in color),
+                count,
+                (count / total * 100) if total else 0.0,
+            )
+            for color, count in counts.most_common()
+        ]
+
+    @staticmethod
+    def _read_coordinate_file(path: str | Path) -> Any:
+        source = Path(path)
+        try:
+            return json.loads(source.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise ValueError(f"Invalid coordinate file: {source}") from error
+
+    def _random_point_in_box(self, box: "ScreenBot.Box", padding: int) -> "ScreenBot.Point":
+        pad = self._integer_non_negative(padding, "padding")
+        left, top = box.left + pad, box.top + pad
+        right, bottom = box.right - pad - 1, box.bottom - pad - 1
+        if right < left or bottom < top:
+            return box.center
+        return self.Point(self._random.randint(left, right), self._random.randint(top, bottom))
+
+    def _point_in_circle(self, radius: int) -> tuple[int, int]:
+        while True:
+            dx = self._random.randint(-radius, radius)
+            dy = self._random.randint(-radius, radius)
+            if dx * dx + dy * dy <= radius * radius:
+                return dx, dy
+
+    def _point_near_center(self, box: "ScreenBot.Box", radius: int) -> "ScreenBot.Point":
+        center = box.center
+        if radius == 0 or (box.width <= 1 and box.height <= 1):
+            return center
+
+        while True:
+            dx, dy = self._point_in_circle(radius)
+            target = self.Point(
+                min(max(center.x + dx, box.left), box.right - 1),
+                min(max(center.y + dy, box.top), box.bottom - 1),
+            )
+            if target != center:
+                return target
+
+    def _pause(self, value_range: tuple[float, float], *, factor: float = 1.0) -> None:
+        self._sleep(self._random.uniform(*value_range) * factor)
+
+    def _human_interval(self, explicit: Optional[float], default: tuple[float, float]) -> float:
+        return self._random.uniform(*default) if explicit is None else self._non_negative(explicit, "interval") * self._random.uniform(0.75, 1.25)
+
+    @classmethod
+    def _point(cls, value: Any) -> "ScreenBot.Point":
+        if isinstance(value, cls.Point):
+            return value
+        if isinstance(value, (str, Path)):
+            return cls._point_from_file(value)
+        try:
+            x, y = value
+            return cls.Point(round(x), round(y))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "point must be ScreenBot.Point, a 2-item sequence, or a position file path"
+            ) from exc
+
+    @classmethod
+    def _point_from_file(cls, path: str | Path) -> "ScreenBot.Point":
+        source = Path(path)
+        raw = cls._read_coordinate_file(source)
+        if not isinstance(raw, dict) or set(raw) != {"x", "y"}:
+            raise ValueError(f"Position file must contain numeric 'x' and 'y' fields: {source}")
+        try:
+            return cls.Point(round(raw["x"]), round(raw["y"]))
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Position file must contain numeric 'x' and 'y' fields: {source}") from error
+
+    @classmethod
+    def _box(cls, value: Any) -> "ScreenBot.Box":
+        if isinstance(value, cls.Box):
+            return value
+        if isinstance(value, (str, Path)):
+            return cls._box_from_file(value)
+        try:
+            top_left, top_right, bottom_right, bottom_left = value
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "box must be ScreenBot.Box or four corner points"
+            ) from exc
+        return cls.Box(top_left, top_right, bottom_right, bottom_left)
+
+    @classmethod
+    def _box_from_file(cls, path: str | Path) -> "ScreenBot.Box":
+        source = Path(path)
+        raw = cls._read_coordinate_file(source)
+        fields = {"left", "top", "right", "bottom"}
+        if not isinstance(raw, dict) or set(raw) != fields:
+            raise ValueError(
+                "Box file must contain numeric 'left', 'top', 'right', and "
+                f"'bottom' fields: {source}"
+            )
+        try:
+            left, top = round(raw["left"]), round(raw["top"])
+            right, bottom = round(raw["right"]), round(raw["bottom"])
+            return cls.Box(
+                (left, top), (right, top), (right, bottom), (left, bottom)
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Box file contains invalid coordinates: {source}") from error
+
+    @staticmethod
+    def _normalize_state(state: str) -> str:
+        normalized = str(state).strip().lower().replace("_", "-")
+        if normalized not in ScreenBot.STATES:
+            raise ValueError(f"state must be one of {ScreenBot.STATES}, got {state!r}")
+        return normalized
+
+    @staticmethod
+    def _confidence(value: float) -> float:
+        number = float(value)
+        if not 0 <= number <= 1:
+            raise ValueError("confidence must be between 0 and 1")
+        return number
+
+    @staticmethod
+    def _non_negative(value: float, name: str) -> float:
+        number = float(value)
+        if number < 0:
+            raise ValueError(f"{name} cannot be negative")
+        return number
+
+    @staticmethod
+    def _integer_non_negative(value: int, name: str) -> int:
+        number = int(value)
+        if number < 0:
+            raise ValueError(f"{name} cannot be negative")
+        return number
+
+    @staticmethod
+    def _positive_integer(value: int, name: str) -> int:
+        number = int(value)
+        if number < 1:
+            raise ValueError(f"{name} must be at least 1")
+        return number
+
+    @staticmethod
+    def _range(value: tuple[float, float], name: str) -> tuple[float, float]:
+        if len(value) != 2:
+            raise ValueError(f"{name} must contain (minimum, maximum)")
+        low, high = float(value[0]), float(value[1])
+        if low < 0 or high < low:
+            raise ValueError(f"{name} must satisfy 0 <= minimum <= maximum")
+        return low, high
+
+    @classmethod
+    def _positive_range(cls, value: tuple[float, float], name: str) -> tuple[float, float]:
+        low, high = cls._range(value, name)
+        if low <= 0:
+            raise ValueError(f"{name} minimum must be greater than zero")
+        return low, high
+
+    @staticmethod
+    def _probability(value: float, name: str) -> float:
+        number = float(value)
+        if not 0 <= number <= 1:
+            raise ValueError(f"{name} must be between 0 and 1")
+        return number
+
+    @staticmethod
+    def _percentage(value: float, name: str) -> float:
+        number = float(value)
+        if not 0 <= number <= 100:
+            raise ValueError(f"{name} must be between 0 and 100")
+        return number
+
+    @staticmethod
+    def _validate_scales(scales: Sequence[float]) -> tuple[float, ...]:
+        values = tuple(float(scale) for scale in scales)
+        if not values or any(scale <= 0 for scale in values):
+            raise ValueError("scales must contain at least one positive number")
+        return values
+
+    @staticmethod
+    def _iou(a: "ScreenBot.Box", b: "ScreenBot.Box") -> float:
+        width = max(0, min(a.right, b.right) - max(a.left, b.left))
+        height = max(0, min(a.bottom, b.bottom) - max(a.top, b.top))
+        intersection = width * height
+        union = a.width * a.height + b.width * b.height - intersection
+        return intersection / union if union else 0.0
