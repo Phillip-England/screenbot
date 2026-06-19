@@ -238,6 +238,7 @@ class ScreenBot:
         timeout: float = 1.0,
         poll_interval: float = 0.25,
         key_press_duration: float = 0.05,
+        key_release_duration: float = 0.05,
         grayscale: bool = True,
         scales: Sequence[float] = (1.0,),
         coordinate_file: str | Path = "screenbot_coords.json",
@@ -257,6 +258,9 @@ class ScreenBot:
         self.poll_interval = self._non_negative(poll_interval, "poll_interval")
         self.key_press_duration = self._non_negative(
             key_press_duration, "key_press_duration"
+        )
+        self.key_release_duration = self._non_negative(
+            key_release_duration, "key_release_duration"
         )
         self.grayscale = bool(grayscale)
         self.scales = self._validate_scales(scales)
@@ -799,6 +803,9 @@ class ScreenBot:
                 self._sleep(dwell)
             finally:
                 self._backend.keyUp(key)
+            # Quartz posts keyboard events asynchronously. Give the release
+            # time to reach the OS before a following shortcut is pressed.
+            self._sleep(self.key_release_duration)
             if index + 1 < count:
                 self._sleep(
                     self._human_interval(interval, self.human_key_interval)

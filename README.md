@@ -215,8 +215,10 @@ bot.hotkey("command", "a")  # use "ctrl" on Linux/Windows
 
 `press()` and `press_and_release()` always send separate key-down and key-up
 events. Fast mode uses `key_press_duration` (0.05 seconds by default) between
-them; human-like mode randomizes the dwell using `human_key_dwell`. Use `hold()`
-when a key must remain down, then pair it with `release()`.
+them, then waits `key_release_duration` (also 0.05 seconds by default) so the OS
+processes the release before another shortcut. Human-like mode randomizes the
+dwell using `human_key_dwell`. Use `hold()` when a key must remain down, then
+pair it with `release()`.
 
 Logging is disabled by default. Pass `log=True` to the constructor, or toggle it
 while a bot is running with `bot.set_logging()` and `bot.set_logging(False)`.

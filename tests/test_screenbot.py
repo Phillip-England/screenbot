@@ -211,7 +211,14 @@ class ScreenBotTests(unittest.TestCase):
         bot.set_wait_time(3, 5).press("enter")
 
         bot._random.uniform.assert_called_once_with(3.0, 5.0)
-        sleeper.assert_called_once_with(4.25)
+        self.assertEqual(
+            sleeper.call_args_list,
+            [
+                unittest.mock.call(0.05),
+                unittest.mock.call(0.05),
+                unittest.mock.call(4.25),
+            ],
+        )
 
     def test_wait_actions_do_not_include_the_default_wait(self):
         sleeper = Mock()
@@ -243,7 +250,10 @@ class ScreenBotTests(unittest.TestCase):
 
         bot.press("enter")
 
-        sleeper.assert_not_called()
+        self.assertEqual(
+            sleeper.call_args_list,
+            [unittest.mock.call(0.05), unittest.mock.call(0.05)],
+        )
 
     def test_dry_run_does_not_include_the_default_wait(self):
         sleeper = Mock()

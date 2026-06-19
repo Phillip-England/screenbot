@@ -79,7 +79,11 @@ class KeyboardTests(unittest.TestCase):
         )
         self.assertEqual(
             sleeper.call_args_list,
-            [call(0.05), call(0.2), call(0.05), call(0.2), call(0.05)],
+            [
+                call(0.05), call(0.05), call(0.2),
+                call(0.05), call(0.05), call(0.2),
+                call(0.05), call(0.05),
+            ],
         )
 
     def test_function_keys_are_validated_and_pressed(self) -> None:
@@ -107,7 +111,29 @@ class KeyboardTests(unittest.TestCase):
             backend.method_calls,
             [call.keyDown("shift"), call.keyUp("shift")],
         )
-        sleeper.assert_called_once_with(0.05)
+        self.assertEqual(sleeper.call_args_list, [call(0.05), call(0.05)])
+
+    def test_release_settles_before_following_shortcut(self) -> None:
+        events = Mock()
+        backend = Mock()
+        sleeper = Mock()
+        events.attach_mock(backend, "backend")
+        events.attach_mock(sleeper, "sleep")
+        bot = ScreenBot(backend=backend, sleeper=sleeper)
+
+        bot.press_and_release("up")
+        bot.hotkey("ctrl", "l")
+
+        self.assertEqual(
+            events.method_calls,
+            [
+                call.backend.keyDown("up"),
+                call.sleep(0.05),
+                call.backend.keyUp("up"),
+                call.sleep(0.05),
+                call.backend.hotkey("ctrl", "l"),
+            ],
+        )
 
     def test_press_releases_key_when_dwell_is_interrupted(self) -> None:
         backend = Mock()
