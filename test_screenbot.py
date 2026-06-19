@@ -58,6 +58,55 @@ class KeyboardTests(unittest.TestCase):
         sleeper.assert_not_called()
 
 
+class WindowAndClickTests(unittest.TestCase):
+    def test_right_click_uses_right_mouse_button(self) -> None:
+        backend = Mock()
+        backend.position.return_value = SimpleNamespace(x=12, y=34)
+        bot = ScreenBot(backend=backend)
+
+        self.assertEqual(bot.right_click((50, 60)), ScreenBot.Point(50, 60))
+
+        backend.click.assert_called_once_with(
+            x=50, y=60, clicks=1, interval=0.0, button="right"
+        )
+
+    def test_window_controls_use_macos_shortcuts(self) -> None:
+        bot = ScreenBot(backend=Mock())
+
+        with patch("screenbot.sys.platform", "darwin"):
+            self.assertEqual(bot.maximize(), ("ctrl", "command", "f"))
+            self.assertEqual(bot.minimize(), ("command", "m"))
+
+        self.assertEqual(
+            bot._backend.method_calls,
+            [call.hotkey("ctrl", "command", "f"), call.hotkey("command", "m")],
+        )
+
+    def test_window_controls_use_windows_shortcuts(self) -> None:
+        bot = ScreenBot(backend=Mock())
+
+        with patch("screenbot.sys.platform", "win32"):
+            self.assertEqual(bot.maximize(), ("win", "up"))
+            self.assertEqual(bot.minimize(), ("win", "down"))
+
+        self.assertEqual(
+            bot._backend.method_calls,
+            [call.hotkey("win", "up"), call.hotkey("win", "down")],
+        )
+
+    def test_window_controls_use_linux_shortcuts(self) -> None:
+        bot = ScreenBot(backend=Mock())
+
+        with patch("screenbot.sys.platform", "linux"):
+            self.assertEqual(bot.maximize(), ("alt", "f10"))
+            self.assertEqual(bot.minimize(), ("alt", "f9"))
+
+        self.assertEqual(
+            bot._backend.method_calls,
+            [call.hotkey("alt", "f10"), call.hotkey("alt", "f9")],
+        )
+
+
 class KillSequenceTests(unittest.TestCase):
     @patch("screenbot.os.kill")
     @patch("screenbot.keyboard.Listener")

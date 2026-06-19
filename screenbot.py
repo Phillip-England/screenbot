@@ -13,6 +13,7 @@ import uuid
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Sequence
 
@@ -22,6 +23,23 @@ from PIL import Image
 from pynput import keyboard, mouse
 
 __all__ = ["ScreenBot", "VirtualDir"]
+
+
+def _action(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Apply the configured delay once after a top-level input action."""
+    @wraps(method)
+    def wrapped(self: "ScreenBot", *args: Any, **kwargs: Any) -> Any:
+        outermost = self._action_depth == 0
+        self._action_depth += 1
+        try:
+            result = method(self, *args, **kwargs)
+        finally:
+            self._action_depth -= 1
+        if outermost and not kwargs.get("dry_run", False):
+            self._wait_after_action()
+        return result
+
+    return wrapped
 
 
 class VirtualDir:
@@ -48,6 +66,14 @@ class ScreenBot:
     HUMAN_LIKE = "human-like"
     STATES = (DEFAULT, HUMAN_LIKE)
     SYSTEM_ID_ENV = "SCREENBOT_SYSTEM_ID"
+    KEY_NEIGHBORS = {
+        "q": "wa", "w": "qase", "e": "wsdr", "r": "edft", "t": "rfgy",
+        "y": "tghu", "u": "yhji", "i": "ujko", "o": "iklp", "p": "ol",
+        "a": "qwsz", "s": "awedxz", "d": "serfcx", "f": "drtgvc",
+        "g": "ftyhbv", "h": "gyujnb", "j": "huikmn", "k": "jiolm",
+        "l": "kop", "z": "asx", "x": "zsdc", "c": "xdfv", "v": "cfgb",
+        "b": "vghn", "n": "bhjm", "m": "njk",
+    }
 
     class Error(Exception):
         """Base exception for ScreenBot operations."""
@@ -227,6 +253,8 @@ class ScreenBot:
         self._sleep = sleeper
         self._random = random.Random(seed)
         self._state = self._normalize_state(state)
+        self.wait_time = (0.0, 0.0)
+        self._action_depth = 0
         self.kill_sequence: Optional[str] = None
         self._kill_buffer = ""
         self._kill_listener: Any = None
@@ -236,6 +264,8 @@ class ScreenBot:
         self.human_move_duration = (0.22, 0.72)
         self.human_click_dwell = (0.035, 0.12)
         self.human_key_interval = (0.035, 0.14)
+        self.human_typo_pause = (0.08, 0.32)
+        self.human_typo_chance = 0.04
         self.human_scroll_pause = (0.04, 0.13)
         self.human_target_jitter = 2
         self.human_image_padding = 3
@@ -260,6 +290,14 @@ class ScreenBot:
         self._state = self._normalize_state(state)
         return self
 
+    def set_human_like(self) -> "ScreenBot":
+        """Enable human-like timing and movement behavior."""
+        return self.set_state(self.HUMAN_LIKE)
+
+    def set_fast(self) -> "ScreenBot":
+        """Enable immediate input behavior without human-like semantics."""
+        return self.set_state(self.DEFAULT)
+
     @contextmanager
     def using_state(self, state: str) -> Iterator["ScreenBot"]:
         """Temporarily use a state, restoring the previous state afterward."""
@@ -273,6 +311,14 @@ class ScreenBot:
     def reseed(self, seed: Optional[int]) -> "ScreenBot":
         """Reset the random stream used by chance and human-like behavior."""
         self._random.seed(seed)
+        return self
+
+    def set_wait_time(
+        self, minimum: float, maximum: Optional[float] = None
+    ) -> "ScreenBot":
+        """Set the exact or random delay applied after each input action."""
+        upper = minimum if maximum is None else maximum
+        self.wait_time = self._range((minimum, upper), "wait time")
         return self
 
     def chance(self, percentage: float) -> bool:
@@ -343,6 +389,8 @@ class ScreenBot:
         move_duration: Optional[tuple[float, float]] = None,
         click_dwell: Optional[tuple[float, float]] = None,
         key_interval: Optional[tuple[float, float]] = None,
+        typo_pause: Optional[tuple[float, float]] = None,
+        typo_chance: Optional[float] = None,
         scroll_pause: Optional[tuple[float, float]] = None,
         target_jitter: Optional[int] = None,
         image_padding: Optional[int] = None,
@@ -356,6 +404,7 @@ class ScreenBot:
             ("human_move_duration", move_duration),
             ("human_click_dwell", click_dwell),
             ("human_key_interval", key_interval),
+            ("human_typo_pause", typo_pause),
             ("human_scroll_pause", scroll_pause),
         ):
             if value is not None:
@@ -370,6 +419,8 @@ class ScreenBot:
             self.human_speed_variation = self._positive_range(speed_variation, "speed_variation")
         if overshoot_chance is not None:
             self.human_overshoot_chance = self._probability(overshoot_chance, "overshoot_chance")
+        if typo_chance is not None:
+            self.human_typo_chance = self._probability(typo_chance, "typo_chance")
         return self
 
     # Screen and pointer -------------------------------------------------
@@ -377,6 +428,11 @@ class ScreenBot:
     def screen_size(self) -> tuple[int, int]:
         size = self._backend.size()
         return int(size.width), int(size.height)
+
+    def screen_center(self) -> "ScreenBot.Point":
+        """Return the center point of the primary screen."""
+        width, height = self.screen_size()
+        return self.Point(width // 2, height // 2)
 
     def mouse_position(self) -> "ScreenBot.Point":
         point = self._backend.position()
@@ -427,6 +483,7 @@ class ScreenBot:
     def capture_template(self, path: str | Path, box: Any) -> Path:
         return self.save_screenshot(path, self._resolve_box(box))
 
+    @_action
     def move_to(self, point: Any, *, duration: Optional[float] = None) -> "ScreenBot.Point":
         target = self._resolve_point(point)
         if not self.is_human_like:
@@ -438,6 +495,11 @@ class ScreenBot:
         self._pause(self.human_pause, factor=0.35)
         return target
 
+    def move_to_center(self, *, duration: Optional[float] = None) -> "ScreenBot.Point":
+        """Move the pointer to the center of the primary screen."""
+        return self.move_to(self.screen_center(), duration=duration)
+
+    @_action
     def move_mouse_up(
         self,
         distance: int,
@@ -448,6 +510,7 @@ class ScreenBot:
         """Move up by ``distance +/- variation`` pixels with human-like motion."""
         return self._move_mouse_direction(0, -1, distance, variation, duration)
 
+    @_action
     def move_mouse_down(
         self,
         distance: int,
@@ -458,6 +521,7 @@ class ScreenBot:
         """Move down by ``distance +/- variation`` pixels with human-like motion."""
         return self._move_mouse_direction(0, 1, distance, variation, duration)
 
+    @_action
     def move_mouse_left(
         self,
         distance: int,
@@ -468,6 +532,7 @@ class ScreenBot:
         """Move left by ``distance +/- variation`` pixels with human-like motion."""
         return self._move_mouse_direction(-1, 0, distance, variation, duration)
 
+    @_action
     def move_mouse_right(
         self,
         distance: int,
@@ -478,6 +543,7 @@ class ScreenBot:
         """Move right by ``distance +/- variation`` pixels with human-like motion."""
         return self._move_mouse_direction(1, 0, distance, variation, duration)
 
+    @_action
     def click(
         self,
         point: Any = None,
@@ -521,6 +587,10 @@ class ScreenBot:
 
     def click_xy(self, x: int, y: int, **kwargs: Any) -> "ScreenBot.Point":
         return self.click((x, y), **kwargs)
+
+    def click_center(self, **kwargs: Any) -> "ScreenBot.Point":
+        """Click the center of the primary screen."""
+        return self.click(self.screen_center(), **kwargs)
 
     def click_box(self, box: Any, *, padding: int = 0, **kwargs: Any) -> "ScreenBot.Point":
         return self.click(self._random_point_in_box(self._resolve_box(box), padding), **kwargs)
@@ -572,6 +642,7 @@ class ScreenBot:
     def right_click(self, point: Any = None, **kwargs: Any) -> "ScreenBot.Point":
         return self.click(point, button="right", **kwargs)
 
+    @_action
     def drag_to(
         self,
         point: Any,
@@ -592,6 +663,7 @@ class ScreenBot:
             self._backend.dragTo(target.x, target.y, duration=duration or 0, button=button)
         return target
 
+    @_action
     def scroll(self, clicks: int, *, x: Optional[int] = None, y: Optional[int] = None) -> int:
         amount = int(clicks)
         if not self.is_human_like:
@@ -609,6 +681,7 @@ class ScreenBot:
         self._pause(self.human_pause, factor=0.4)
         return amount
 
+    @_action
     def scroll_random(
         self,
         pixels: int,
@@ -665,18 +738,26 @@ class ScreenBot:
 
     # Keyboard -----------------------------------------------------------
 
+    @_action
     def write(self, text: str, *, interval: Optional[float] = None) -> str:
-        """Type text exactly; human-like mode only varies timing."""
+        """Type text accurately, with corrected mistakes in human-like mode."""
         if not self.is_human_like:
             self._backend.write(text, interval=0 if interval is None else interval)
             return text
         self._pause(self.human_pause)
         for char in text:
+            mistake = self._typing_mistake(char)
+            if mistake is not None:
+                self._backend.write(mistake)
+                self._pause(self.human_typo_pause)
+                self._backend.press("backspace")
+                self._sleep(self._human_interval(interval, self.human_key_interval))
             self._backend.write(char)
             self._sleep(self._human_interval(interval, self.human_key_interval))
         self._pause(self.human_pause, factor=0.4)
         return text
 
+    @_action
     def press(self, key: str, *, presses: int = 1, interval: Optional[float] = None) -> str:
         count = self._positive_integer(presses, "presses")
         if not self.is_human_like:
@@ -692,16 +773,19 @@ class ScreenBot:
         self._pause(self.human_pause, factor=0.4)
         return key
 
+    @_action
     def hold(self, key: str) -> str:
         """Hold a key down until :meth:`release` is called for that key."""
         self._backend.keyDown(key)
         return key
 
+    @_action
     def release(self, key: str) -> str:
         """Release a key previously pressed with :meth:`hold`."""
         self._backend.keyUp(key)
         return key
 
+    @_action
     def hotkey(self, *keys: str) -> tuple[str, ...]:
         if not keys:
             raise ValueError("hotkey requires at least one key")
@@ -722,6 +806,26 @@ class ScreenBot:
         keys = ("command" if sys.platform == "darwin" else "ctrl", "w")
         self.hotkey(*keys)
         return keys
+
+    def maximize(self) -> tuple[str, ...]:
+        """Maximize the active window using the current platform's shortcut."""
+        if sys.platform == "darwin":
+            keys = ("ctrl", "command", "f")
+        elif sys.platform == "win32":
+            keys = ("win", "up")
+        else:
+            keys = ("alt", "f10")
+        return self.hotkey(*keys)
+
+    def minimize(self) -> tuple[str, ...]:
+        """Minimize the active window using the current platform's shortcut."""
+        if sys.platform == "darwin":
+            keys = ("command", "m")
+        elif sys.platform == "win32":
+            keys = ("win", "down")
+        else:
+            keys = ("alt", "f9")
+        return self.hotkey(*keys)
 
     def zoom_in(
         self,
@@ -1481,8 +1585,22 @@ class ScreenBot:
     def _pause(self, value_range: tuple[float, float], *, factor: float = 1.0) -> None:
         self._sleep(self._random.uniform(*value_range) * factor)
 
+    def _wait_after_action(self) -> None:
+        minimum, maximum = self.wait_time
+        if maximum <= 0:
+            return
+        duration = minimum if minimum == maximum else self._random.uniform(minimum, maximum)
+        self._sleep(duration)
+
     def _human_interval(self, explicit: Optional[float], default: tuple[float, float]) -> float:
         return self._random.uniform(*default) if explicit is None else self._non_negative(explicit, "interval") * self._random.uniform(0.75, 1.25)
+
+    def _typing_mistake(self, char: str) -> Optional[str]:
+        neighbors = self.KEY_NEIGHBORS.get(char.lower())
+        if not neighbors or self._random.random() >= self.human_typo_chance:
+            return None
+        mistake = self._random.choice(neighbors)
+        return mistake.upper() if char.isupper() else mistake
 
     @classmethod
     def _point(cls, value: Any) -> "ScreenBot.Point":

@@ -5,7 +5,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -60,6 +60,31 @@ class ScreenBotTests(unittest.TestCase):
     def test_pixel_color_defaults_to_mouse(self):
         self.assertEqual(self.bot.pixel_color(), (12, 34, 99))
 
+    def test_screen_center_uses_primary_screen_dimensions(self):
+        backend = Mock()
+        backend.size.return_value = SimpleNamespace(width=1919, height=1079)
+        bot = ScreenBot(backend=backend)
+
+        self.assertEqual(bot.screen_center(), ScreenBot.Point(959, 539))
+
+    def test_move_to_center_moves_to_screen_center(self):
+        backend = Mock()
+        backend.size.return_value = SimpleNamespace(width=1920, height=1080)
+        bot = ScreenBot(backend=backend)
+
+        self.assertEqual(bot.move_to_center(duration=0.25), ScreenBot.Point(960, 540))
+        backend.moveTo.assert_called_once_with(960, 540, duration=0.25)
+
+    def test_click_center_forwards_click_options(self):
+        backend = Mock()
+        backend.size.return_value = SimpleNamespace(width=1920, height=1080)
+        bot = ScreenBot(backend=backend)
+
+        self.assertEqual(bot.click_center(button="right"), ScreenBot.Point(960, 540))
+        backend.click.assert_called_once_with(
+            x=960, y=540, clicks=1, interval=0.0, button="right"
+        )
+
     def test_color_counts_are_most_common_first(self):
         colors = self.bot.colors_in_box(((0, 0), (2, 0), (2, 2), (0, 2)))
         self.assertEqual(colors[0].color, (255, 0, 0))
@@ -100,6 +125,140 @@ class ScreenBotTests(unittest.TestCase):
         self.assertEqual(calls, [])
         with self.assertRaises(TypeError):
             self.bot.run_with_chance(50, "not callable")
+
+    def test_human_like_and_fast_modes_are_easy_to_toggle(self):
+        self.assertIs(self.bot.set_human_like(), self.bot)
+        self.assertEqual(self.bot.state, ScreenBot.HUMAN_LIKE)
+        self.assertTrue(self.bot.is_human_like)
+
+        self.assertIs(self.bot.set_fast(), self.bot)
+        self.assertEqual(self.bot.state, ScreenBot.DEFAULT)
+        self.assertFalse(self.bot.is_human_like)
+
+    def test_using_state_temporarily_switches_modes(self):
+        self.bot.set_fast()
+
+        with self.bot.using_state(ScreenBot.HUMAN_LIKE):
+            self.assertTrue(self.bot.is_human_like)
+
+        self.assertFalse(self.bot.is_human_like)
+
+    def test_human_like_typing_corrects_mistakes_and_remains_accurate(self):
+        backend = Mock()
+        sleeper = Mock()
+        bot = ScreenBot(
+            state=ScreenBot.HUMAN_LIKE,
+            backend=backend,
+            sleeper=sleeper,
+            seed=7,
+        )
+        bot.configure_human_like(
+            pause=(0, 0),
+            key_interval=(0.01, 0.02),
+            typo_pause=(0.03, 0.04),
+            typo_chance=1,
+        )
+
+        self.assertEqual(bot.write("Ab "), "Ab ")
+
+        typed = ""
+        for item in backend.method_calls:
+            if item[0] == "write":
+                typed += item.args[0]
+            elif item == unittest.mock.call.press("backspace"):
+                typed = typed[:-1]
+        self.assertEqual(typed, "Ab ")
+        self.assertEqual(
+            [item for item in backend.method_calls if item == unittest.mock.call.press("backspace")],
+            [unittest.mock.call.press("backspace")] * 2,
+        )
+        self.assertGreaterEqual(sleeper.call_count, 7)
+
+    def test_fast_typing_is_direct_and_does_not_make_mistakes(self):
+        backend = Mock()
+        sleeper = Mock()
+        bot = ScreenBot(backend=backend, sleeper=sleeper).set_fast()
+        bot.configure_human_like(typo_chance=1)
+
+        self.assertEqual(bot.write("accurate"), "accurate")
+
+        backend.write.assert_called_once_with("accurate", interval=0)
+        sleeper.assert_not_called()
+
+    def test_human_typing_configuration_is_validated(self):
+        bot = ScreenBot(backend=Mock())
+
+        for chance in (-0.1, 1.1):
+            with self.subTest(chance=chance), self.assertRaises(ValueError):
+                bot.configure_human_like(typo_chance=chance)
+
+    def test_exact_default_wait_runs_once_after_each_action(self):
+        backend = Mock()
+        sleeper = Mock()
+        bot = ScreenBot(backend=backend, sleeper=sleeper)
+
+        self.assertIs(bot.set_wait_time(3), bot)
+        bot.click((10, 20))
+        bot.write("hello")
+
+        self.assertEqual(sleeper.call_args_list, [unittest.mock.call(3.0)] * 2)
+
+    def test_random_default_wait_uses_configured_range(self):
+        sleeper = Mock()
+        bot = ScreenBot(backend=Mock(), sleeper=sleeper)
+        bot._random.uniform = Mock(return_value=4.25)
+
+        bot.set_wait_time(3, 5).press("enter")
+
+        bot._random.uniform.assert_called_once_with(3.0, 5.0)
+        sleeper.assert_called_once_with(4.25)
+
+    def test_wait_actions_do_not_include_the_default_wait(self):
+        sleeper = Mock()
+        bot = ScreenBot(backend=Mock(), sleeper=sleeper).set_wait_time(3, 5)
+        bot._random.uniform = Mock(return_value=4.0)
+
+        self.assertEqual(bot.wait(2), 2.0)
+        self.assertEqual(bot.wait_random(6, 8), 4.0)
+
+        self.assertEqual(
+            sleeper.call_args_list,
+            [unittest.mock.call(2.0), unittest.mock.call(4.0)],
+        )
+        bot._random.uniform.assert_called_once_with(6.0, 8.0)
+
+    def test_composite_action_only_adds_one_default_wait(self):
+        backend = Mock()
+        backend.size.return_value = SimpleNamespace(width=1920, height=1080)
+        sleeper = Mock()
+        bot = ScreenBot(backend=backend, sleeper=sleeper).set_wait_time(1)
+
+        bot.click_center()
+
+        sleeper.assert_called_once_with(1.0)
+
+    def test_zero_default_wait_disables_action_delay(self):
+        sleeper = Mock()
+        bot = ScreenBot(backend=Mock(), sleeper=sleeper).set_wait_time(0)
+
+        bot.press("enter")
+
+        sleeper.assert_not_called()
+
+    def test_dry_run_does_not_include_the_default_wait(self):
+        sleeper = Mock()
+        bot = ScreenBot(backend=Mock(), sleeper=sleeper).set_wait_time(3)
+
+        bot.click((10, 20), dry_run=True)
+
+        sleeper.assert_not_called()
+
+    def test_default_wait_range_is_validated(self):
+        bot = ScreenBot(backend=Mock())
+
+        for values in ((-1,), (5, 3)):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                bot.set_wait_time(*values)
 
     def test_capture_box_samples_pointer_on_zero_key_presses(self):
         positions = iter([(8, 9), (2, 7), (3, 1), (10, 4)])

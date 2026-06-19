@@ -176,23 +176,71 @@ bot.double_click((500, 300))
 bot.right_click((500, 300))
 bot.click_box(box, padding=5)
 bot.move_to((800, 400))
+center = bot.screen_center()
+bot.move_to_center()
+bot.click_center()
 bot.drag_to((900, 400))
 bot.scroll(-5)
 
+bot.maximize()  # active window
+bot.minimize()  # active window
+
 bot.write("hello")
 bot.press("enter")
+bot.hold("shift")
+bot.press("a")
+bot.release("shift")
 bot.hotkey("command", "a")  # use "ctrl" on Linux/Windows
 ```
+
+Set an automatic delay after every mouse or keyboard action. Pass one value for
+an exact delay, or two values for a random delay in that inclusive range:
+
+```python
+bot.set_wait_time(3)     # exactly 3 seconds after each action
+bot.set_wait_time(3, 5)  # randomly 3 to 5 seconds after each action
+bot.set_wait_time(0)     # disable the automatic delay
+```
+
+Explicit waiting methods such as `wait()`, `wait_random()`, and `countdown()` do
+not add the automatic action delay.
+
+Window controls use the operating system's standard shortcut. On macOS,
+`maximize()` enters full screen; on Windows it uses Win+Up; on Linux it uses
+Alt+F10. `minimize()` uses Command+M, Win+Down, or Alt+F9 respectively.
 
 `human-like` state adds varied timing, curved movement, target variation, click
 dwell, and paced scrolling. The default state performs direct input:
 
 ```python
-bot = ScreenBot(state="human-like", seed=42)
-bot.click((500, 300))
+bot = ScreenBot(seed=42)
 
-with bot.using_state("default"):
+bot.set_human_like()
+bot.click((500, 300))
+bot.write("Human-like typing varies the cadence and corrects occasional typos.")
+
+bot.set_fast()
+bot.click((100, 100))
+
+# Temporarily switch without changing the surrounding mode.
+with bot.using_state(ScreenBot.HUMAN_LIKE):
     bot.click((100, 100))
+```
+
+Fast mode executes mouse and keyboard input immediately unless an explicit
+duration or interval is supplied. The default action delay configured with
+`set_wait_time()` still applies in either mode.
+
+Human-like typing always produces the requested final text. It uses random
+intervals between keystrokes and may type an adjacent key, pause, backspace it,
+and continue with the correct character. Tune or disable mistakes as needed:
+
+```python
+bot.configure_human_like(
+    key_interval=(0.04, 0.16),
+    typo_chance=0.03,       # probability per eligible letter
+    typo_pause=(0.08, 0.3),
+)
 ```
 
 Run an action with a percentage chance. A seed makes the sequence repeatable:
