@@ -59,7 +59,11 @@ class KeyboardTests(unittest.TestCase):
 
         self.assertEqual(
             backend.method_calls,
-            [event for key in methods.values() for event in (call.keyDown(key), call.keyUp(key))],
+            [
+                event
+                for key in methods.values()
+                for event in (call.keyDown(key), call.keyUp(key), call.keyUp(key))
+            ],
         )
 
     def test_named_special_key_forwards_repeat_options(self) -> None:
@@ -72,9 +76,9 @@ class KeyboardTests(unittest.TestCase):
         self.assertEqual(
             backend.method_calls,
             [
-                call.keyDown("down"), call.keyUp("down"),
-                call.keyDown("down"), call.keyUp("down"),
-                call.keyDown("down"), call.keyUp("down"),
+                call.keyDown("down"), call.keyUp("down"), call.keyUp("down"),
+                call.keyDown("down"), call.keyUp("down"), call.keyUp("down"),
+                call.keyDown("down"), call.keyUp("down"), call.keyUp("down"),
             ],
         )
         self.assertEqual(
@@ -93,7 +97,7 @@ class KeyboardTests(unittest.TestCase):
         self.assertEqual(bot.press_function_key(12), "f12")
         self.assertEqual(
             backend.method_calls,
-            [call.keyDown("f12"), call.keyUp("f12")],
+            [call.keyDown("f12"), call.keyUp("f12"), call.keyUp("f12")],
         )
         for number in (0, 25):
             with self.subTest(number=number):
@@ -109,7 +113,7 @@ class KeyboardTests(unittest.TestCase):
 
         self.assertEqual(
             backend.method_calls,
-            [call.keyDown("shift"), call.keyUp("shift")],
+            [call.keyDown("shift"), call.keyUp("shift"), call.keyUp("shift")],
         )
         self.assertEqual(sleeper.call_args_list, [call(0.05), call(0.05)])
 
@@ -121,8 +125,9 @@ class KeyboardTests(unittest.TestCase):
         events.attach_mock(sleeper, "sleep")
         bot = ScreenBot(backend=backend, sleeper=sleeper)
 
-        bot.press_and_release("up")
-        bot.hotkey("ctrl", "l")
+        with patch("screenbot.sys.platform", "linux"):
+            bot.press_and_release("up")
+            bot.keycombo(("ctrl", "l"), ("command", "l"))
 
         self.assertEqual(
             events.method_calls,
@@ -131,6 +136,7 @@ class KeyboardTests(unittest.TestCase):
                 call.sleep(0.05),
                 call.backend.keyUp("up"),
                 call.sleep(0.05),
+                call.backend.keyUp("up"),
                 call.backend.hotkey("ctrl", "l"),
             ],
         )
@@ -162,7 +168,7 @@ class KeyboardTests(unittest.TestCase):
 
         self.assertEqual(
             backend.method_calls,
-            [call.keyDown("enter"), call.keyUp("enter")],
+            [call.keyDown("enter"), call.keyUp("enter"), call.keyUp("enter")],
         )
         dwell = sleeper.call_args_list[1].args[0]
         self.assertGreaterEqual(dwell, bot.human_key_dwell[0])
@@ -254,57 +260,32 @@ class WindowAndClickTests(unittest.TestCase):
             x=50, y=60, clicks=1, interval=0.0, button="right"
         )
 
-    def test_window_controls_use_macos_shortcuts(self) -> None:
+    def test_keycombo_uses_macos_combo(self) -> None:
         bot = ScreenBot(backend=Mock())
 
         with patch("screenbot.sys.platform", "darwin"):
-            self.assertEqual(bot.maximize(), ("ctrl", "command", "f"))
-            self.assertEqual(bot.minimize(), ("command", "m"))
+            result = bot.keycombo(("control", "p"), ("command", "p"))
 
-        self.assertEqual(
-            bot._backend.method_calls,
-            [call.hotkey("ctrl", "command", "f"), call.hotkey("command", "m")],
-        )
+        self.assertEqual(result, ("command", "p"))
+        bot._backend.hotkey.assert_called_once_with("command", "p")
 
-    def test_window_controls_use_windows_shortcuts(self) -> None:
+    def test_keycombo_uses_windows_linux_combo(self) -> None:
+        for platform in ("linux", "win32"):
+            with self.subTest(platform=platform):
+                bot = ScreenBot(backend=Mock())
+                with patch("screenbot.sys.platform", platform):
+                    result = bot.keycombo(("control", "p"), ("command", "p"))
+
+                self.assertEqual(result, ("ctrl", "p"))
+                bot._backend.hotkey.assert_called_once_with("ctrl", "p")
+
+    def test_keycombo_requires_both_platform_combos(self) -> None:
         bot = ScreenBot(backend=Mock())
 
-        with patch("screenbot.sys.platform", "win32"):
-            self.assertEqual(bot.maximize(), ("win", "up"))
-            self.assertEqual(bot.minimize(), ("win", "down"))
-
-        self.assertEqual(
-            bot._backend.method_calls,
-            [call.hotkey("win", "up"), call.hotkey("win", "down")],
-        )
-
-    def test_window_controls_use_linux_shortcuts(self) -> None:
-        bot = ScreenBot(backend=Mock())
-
-        with patch("screenbot.sys.platform", "linux"):
-            self.assertEqual(bot.maximize(), ("alt", "f10"))
-            self.assertEqual(bot.minimize(), ("alt", "f9"))
-
-        self.assertEqual(
-            bot._backend.method_calls,
-            [call.hotkey("alt", "f10"), call.hotkey("alt", "f9")],
-        )
-
-    def test_websearch_uses_macos_shortcut(self) -> None:
-        bot = ScreenBot(backend=Mock())
-
-        with patch("screenbot.sys.platform", "darwin"):
-            self.assertEqual(bot.websearch(), ("command", "l"))
-
-        bot._backend.hotkey.assert_called_once_with("command", "l")
-
-    def test_websearch_uses_control_shortcut_on_other_platforms(self) -> None:
-        bot = ScreenBot(backend=Mock())
-
-        with patch("screenbot.sys.platform", "linux"):
-            self.assertEqual(bot.websearch(), ("ctrl", "l"))
-
-        bot._backend.hotkey.assert_called_once_with("ctrl", "l")
+        for windows_linux, macos in (((), ("command", "p")), (("ctrl", "p"), ())):
+            with self.subTest(windows_linux=windows_linux, macos=macos):
+                with self.assertRaisesRegex(ValueError, "non-empty combo"):
+                    bot.keycombo(windows_linux, macos)
 
 
 class KillSequenceTests(unittest.TestCase):

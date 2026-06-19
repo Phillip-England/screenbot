@@ -1,23 +1,24 @@
 # screenbot
 
-`screenbot` is a Python screen automation library and a script-friendly CLI. It
-can inspect coordinates and colors, save reusable point and box files, automate
-mouse and keyboard input, take screenshots, and locate image templates.
+`screenbot` is a consistent Python API and script-friendly CLI for screen inspection,
+mouse and keyboard automation, screenshots, reusable coordinates, and image
+matching. It supports direct automation and an optional seeded `human-like` mode.
 
-## Install
+## Requirements and installation
 
-The project uses [`uv`](https://docs.astral.sh/uv/). Install the `screenbot`
-command and its isolated Python environment with:
+- Python 3.10 or newer
+- macOS, Windows, or Linux with a graphical desktop
+- [`uv`](https://docs.astral.sh/uv/) for the commands below
+
+Install the CLI in an isolated environment:
 
 ```bash
 make install
+screenbot --version
 screenbot --help
 ```
 
-By default, `uv` places tool executables in `~/.local/bin`. Run `uv tool update-shell`
-once if that directory is not already on your `PATH`.
-
-For library development inside this repository:
+For development or library use from this checkout:
 
 ```bash
 uv sync
@@ -25,56 +26,124 @@ uv run python your_script.py
 ```
 
 On macOS, grant the terminal or Python executable **Accessibility** permission
-for global clicks and input, and **Screen Recording** permission for screenshots
-and pixel/image inspection. These settings are under **System Settings > Privacy
-& Security**. Restart the application after changing permissions.
+for input and **Screen Recording** permission for screenshots, pixels, and image
+matching. Restart it after changing permissions. Linux may require a desktop
+session supported by PyAutoGUI; native Wayland sessions can restrict automation.
+
+## Quick start
+
+```python
+from screenbot import Box, Point, ScreenBot
+
+with ScreenBot(timeout=3, confidence=0.85) as bot:
+    bot.click(Point(500, 300))
+    bot.write("hello")
+    bot.press("enter")
+
+    area = Box.from_xywh(100, 100, 640, 480)
+    bot.save_screenshot("artifacts/area.png", area)
+
+    if match := bot.locate("submit.png"):
+        bot.click(match.center)
+```
+
+The context manager stops any configured global kill listener. Calling
+`bot.close()` directly is equivalent and is safe more than once.
+
+## Values and accepted coordinates
+
+Public imports are:
+
+```python
+from screenbot import (
+    Box, ColorCount, ImageNotFound, Match, Pixel, Point,
+    ScreenBot, ScreenBotError, VirtualDir, __version__,
+)
+```
+
+`ScreenBot.Point`, `ScreenBot.Box`, and the other nested names remain available
+for compatibility. New code should prefer module-level imports.
+
+```python
+point = Point(10, 20)
+point.as_tuple()                 # (10, 20)
+point.as_dict()                  # {"x": 10, "y": 20}
+point.offset(dx=5, dy=-2)        # Point(15, 18)
+
+box = Box.from_ltrb(10, 20, 110, 70)
+box = Box.from_xywh(10, 20, 100, 50)
+box.center                       # Point(60, 45)
+box.as_region_tuple()            # (10, 20, 100, 50)
+box.as_dict()
+box.contains((20, 30))
+```
+
+Methods accepting a point support a `Point`, an `(x, y)` pair, an object with
+`x` and `y`, or a saved position JSON path. Methods accepting a box support a
+`Box`, four corner points, or a saved box JSON path. Boxes use half-open edges:
+`left <= x < right` and `top <= y < bottom`.
+
+`Match` exposes `x`, `y`, `width`, `height`, `confidence`, `image_path`, `scale`,
+`center`, `box`, and `as_dict()`. `ColorCount` exposes `color`, `hex`, `count`,
+`percentage`, and `as_dict()`. `Pixel` exposes `x`, `y`, `color`, `hex`, and
+`as_dict()`.
 
 ## CLI
 
-Every normal result is written to stdout. Interactive capture instructions are
-written to stderr, which makes the commands suitable for redirects, pipes, and
-command substitution.
+Normal results go to stdout and interactive instructions go to stderr. JSON
+output is compact, so commands work cleanly in pipes and scripts.
 
-### Mouse positions
+### Capture coordinates
 
-Move the pointer and press `0` to print its coordinate. Keep pressing `0` to
-print more positions; press Ctrl+C to stop:
+Move the pointer and press `0`; press Ctrl+C to stop the repeating mouse command:
 
 ```bash
 screenbot mouse
-# 842 517
-
 screenbot mouse --json
-# {"x":842,"y":517}
-```
-
-Save each captured position as a reusable position file while also printing it.
-Each new `0` press updates this system's entry with the latest position:
-
-```bash
 screenbot mouse --save login-button.json
-```
 
-The file can be passed directly to library methods that accept a point.
-
-### Boxes
-
-Capture a rectangle by moving the pointer to each corner and pressing `0`. The
-smallest axis-aligned rectangle containing the four marked positions is returned:
-
-```bash
 screenbot box
 screenbot box --json
 screenbot box --save toolbar.json
 ```
 
-The four positions can be marked in any order.
+A box is the smallest axis-aligned rectangle containing four captured points;
+the points may be marked in any order.
+
+### Inspect pixels and colors
+
+```bash
+screenbot pixel
+screenbot pixel --at 100 250 --json
+
+screenbot colors screenshot.png --limit 10
+screenbot colors screenshot.png --json
+screenbot colors --box 0 0 500 300 --limit 20
+screenbot colors --box-file toolbar.json --pixels --json
+```
+
+Color counts are ordered most-common first. `--pixels` emits screen pixels in
+row-major order and is available for boxes, not image files.
+
+### Screenshots and matching
+
+```bash
+screenbot screenshot full.png
+screenbot screenshot toolbar.png --box-file toolbar.json
+screenbot screenshot region.png --box 0 0 500 300
+
+screenbot locate save-button.png
+screenbot locate save-button.png --confidence 0.9 --json
+screenbot locate icon.png --all --limit 20 --json
+```
+
+`locate` exits with status `1` when no match exists. Other operational failures
+also return `1`; interruption returns `130`.
 
 ### Portable coordinate files
 
-Position and box files store coordinates by ScreenBot system ID. Saving an existing
-file updates only the current system, so the same JSON file can be committed and
-used across machines after it has been captured once on each machine:
+Saved position and box files store values by system ID. Capturing the same file
+on another machine updates that machine only:
 
 ```json
 {
@@ -85,263 +154,267 @@ used across machines after it has been captured once on each machine:
 }
 ```
 
-ScreenBot creates a random, non-sensitive ID on first use and stores it at
-`~/.config/screenbot/system-id` (or under `XDG_CONFIG_HOME`). View it with
-`screenbot system`. Set `SCREENBOT_SYSTEM_ID` to override it in containers or
-managed environments. Existing flat coordinate files remain readable.
+Run `screenbot system` to print the current ID. ScreenBot creates it at
+`~/.config/screenbot/system-id`, respecting `XDG_CONFIG_HOME`. Set
+`SCREENBOT_SYSTEM_ID` for managed environments. Legacy flat coordinate files
+remain readable.
 
-### Pixel colors
-
-Inspect the pixel under the mouse by moving the pointer and pressing `0`, or use
-a specific coordinate:
-
-```bash
-screenbot pixel
-# #2878D7 40 120 215
-
-screenbot pixel --at 100 250 --json
-# {"x":100,"y":250,"rgb":[40,120,215],"hex":"#2878D7"}
-```
-
-### Image and box colors
-
-List every unique image color from most to least common. Each row contains hex,
-RGB channels, pixel count, and percentage:
-
-```bash
-screenbot colors screenshot.png
-screenbot colors screenshot.png --limit 10
-screenbot colors screenshot.png --limit 10 --json
-```
-
-Inspect a screen region by pressing `0` at four pointer positions, loading a saved
-box, or passing coordinates explicitly:
-
-```bash
-screenbot colors --limit 20
-screenbot colors --box-file toolbar.json --limit 20
-screenbot colors --box 0 0 500 300 --limit 20
-```
-
-To emit every pixel instead of aggregated counts, use `--pixels`. Rows are in
-top-to-bottom, left-to-right order and include screen coordinates:
-
-```bash
-screenbot colors --box-file toolbar.json --pixels
-screenbot colors --box 0 0 10 10 --pixels --json
-```
-
-Use `screenbot COMMAND --help` for all options.
-
-## Library
-
-The CLI is built on the same `ScreenBot` class available to Python scripts:
+## Configuration
 
 ```python
-from screenbot import ScreenBot
-
-bot = ScreenBot()
-
-point = bot.mouse_position()
-print(point.x, point.y)
-bot.save_position_file("button.json", point)
-
-box = bot.load_box_file("toolbar.json")
-print(box.left, box.top, box.right, box.bottom)
-
-print(bot.pixel_color())
-for item in bot.colors_in_box(box)[:10]:
-    print(item.hex, item.color, item.count, item.percentage)
+bot = ScreenBot(
+    state=ScreenBot.DEFAULT,       # or ScreenBot.HUMAN_LIKE
+    confidence=0.80,
+    timeout=1.0,
+    poll_interval=0.25,
+    key_press_duration=0.05,
+    key_release_duration=0.05,
+    grayscale=True,
+    scales=(1.0,),
+    coordinate_file="screenbot_coords.json",
+    seed=42,
+    failsafe=True,
+    kill_sequence=None,
+    log=False,
+)
 ```
 
-Position and box files can be used anywhere the respective value is accepted:
+`backend`, `sleeper`, `system_id`, and `log_stream` are dependency-injection
+options useful for tests and embedded applications. PyAutoGUI's corner failsafe
+is enabled by default. A `kill_sequence` starts a global keyboard listener and
+sends SIGINT when that exact character sequence is typed.
+
+Configuration methods return the bot for fluent setup:
 
 ```python
-bot.click("button.json")
-bot.save_screenshot("toolbar.png", "toolbar.json")
+bot.set_state(ScreenBot.HUMAN_LIKE)
+bot.set_human_like()
+bot.set_fast()
+bot.set_logging(True)
+bot.reseed(42)
+bot.configure_kill_sequence("911")
+bot.stop_kill_listener()
+
+with bot.using_state(ScreenBot.HUMAN_LIKE):
+    bot.click((500, 300))
 ```
 
-Image colors are also available without using the screen:
+Read `bot.state` for the active state and `bot.is_human_like` for a boolean check.
+
+Set a delay after every top-level input action. Explicit waits do not add it:
 
 ```python
-for item in bot.colors_in_image("screenshot.png"):
-    print(item.as_dict())
+bot.set_wait_time(1)       # exactly one second
+bot.set_wait_time(1, 3)    # random inclusive range
+bot.set_wait_time(0)       # disabled
 ```
 
-### Automation
+## Screen inspection
 
 ```python
-bot = ScreenBot(log=True)  # print each action to the terminal
+width, height = bot.screen_size()
+center = bot.screen_center()
+pointer = bot.mouse_position()
 
-bot.click((500, 300))
+image = bot.screenshot()
+region_image = bot.screenshot(box)
+path = bot.save_screenshot("screen.png", box)
+path = bot.capture_template("button.png", box)
+
+rgb = bot.pixel_color()                  # current pointer
+rgb = bot.pixel_color((100, 200))
+matches = bot.pixel_matches((100, 200), (40, 120, 215), tolerance=5)
+
+for color in bot.colors_in_box(box)[:10]:
+    print(color.hex, color.count, color.percentage)
+for color in bot.colors_in_image("screen.png"):
+    print(color.as_dict())
+for pixel in bot.pixels_in_box(box):
+    print(pixel.as_dict())
+```
+
+RGB tolerance is per channel. Colors must contain exactly three integer channels
+from `0` through `255`.
+
+## Mouse automation
+
+```python
+bot.move_to((500, 300), duration=0.2)
+bot.move_to_center()
+bot.move_mouse_up(100, variation=5)
+bot.move_mouse_down(100)
+bot.move_mouse_left(100)
+bot.move_mouse_right(100)
+
+bot.click()                              # current pointer
+bot.click((500, 300), button="left")
+bot.click_xy(500, 300)
+bot.click_center()
 bot.double_click((500, 300))
 bot.right_click((500, 300))
 bot.click_box(box, padding=5)
-bot.move_to((800, 400))
-center = bot.screen_center()
-bot.move_to_center()
-bot.click_center()
-bot.drag_to((900, 400))
+bot.click_grid(box, columns=4, rows=7, variation=3)
+bot.drag_to((900, 400), button="left", duration=0.5)
+```
+
+`click()` also accepts `clicks`, `interval`, `offset`, `jitter`, `move_only`, and
+`dry_run`. It returns the resolved target point. `dry_run=True` resolves the
+target without moving, clicking, logging an action delay, or sleeping.
+
+PyAutoGUI scroll units are platform-dependent:
+
+```python
 bot.scroll(-5)
+bot.scroll_random(800, direction="down", variation=100, duration=(1, 2))
+bot.scroll_down(800)
+bot.scroll_up(800)
+```
 
-bot.maximize()  # active window
-bot.minimize()  # active window
-bot.websearch()  # focus the active browser's address/search bar
+The approximate-pixel helpers return the actual estimated pixel distance.
 
-bot.write("hello")
-bot.press("enter")  # key down, short dwell, then key up
-bot.press_and_release("enter")  # explicit name for the same behavior
-bot.press_arrow_up()
-bot.press_arrow_down(presses=3, interval=0.1)
-bot.press_arrow_left()
-bot.press_arrow_right()
-bot.press_enter()
-bot.press_escape()
-bot.press_tab()
-bot.press_space()
-bot.press_backspace()
-bot.press_delete()
-bot.press_insert()
-bot.press_home()
-bot.press_end()
-bot.press_page_up()
-bot.press_page_down()
-bot.press_function_key(5)  # F1 through F24
+## Keyboard automation
+
+```python
+bot.write("hello", interval=0.05)
+bot.press("enter")
+bot.press("down", presses=3, interval=0.1)
+bot.press_and_release("escape")
+
 bot.hold("shift")
 bot.press("a")
 bot.release("shift")
-bot.hotkey("command", "a")  # use "ctrl" on Linux/Windows
+
+bot.hotkey("control", "a")
+bot.keycombo(("control", "p"), ("command", "p"))
+#             Windows/Linux       macOS
 ```
 
-`press()` and `press_and_release()` always send separate key-down and key-up
-events. Fast mode uses `key_press_duration` (0.05 seconds by default) between
-them, then waits `key_release_duration` (also 0.05 seconds by default) so the OS
-processes the release before another shortcut. Human-like mode randomizes the
-dwell using `human_key_dwell`. Use `hold()` when a key must remain down, then
-pair it with `release()`.
+`hotkey()` normalizes `control` to PyAutoGUI's portable `ctrl`. `keycombo()`
+selects the first sequence on Windows/Linux and the second on macOS, then uses
+the same hotkey implementation.
 
-Logging is disabled by default. Pass `log=True` to the constructor, or toggle it
-while a bot is running with `bot.set_logging()` and `bot.set_logging(False)`.
-Actions include their arguments and resolved result; image searches report their
-matches, and waits report their duration. Logs are written to stderr by default.
+Convenience methods `press_arrow_up`, `press_arrow_down`, `press_arrow_left`,
+`press_arrow_right`, `press_enter`, `press_escape`, `press_tab`, `press_space`,
+`press_backspace`, `press_delete`, `press_insert`, `press_home`, `press_end`,
+`press_page_up`, and `press_page_down` accept the same `presses` and `interval`
+options as `press`. Use `press_function_key(1)` through `press_function_key(24)`
+for function keys.
 
-The named special-key methods use PyAutoGUI's portable key names and work on
-macOS, Windows, and Linux. They accept the same `presses` and `interval` options
-as `press()`; operating systems may reserve some function-key combinations.
+`press()` sends key-down and key-up events with a configurable dwell. It then
+waits `key_release_duration` and reaffirms key-up to avoid a following shortcut
+observing a stuck modifier. `hold()` intentionally keeps a key down.
 
-Set an automatic delay after every mouse or keyboard action. Pass one value for
-an exact delay, or two values for a random delay in that inclusive range:
+## Image matching
 
 ```python
-bot.set_wait_time(3)     # exactly 3 seconds after each action
-bot.set_wait_time(3, 5)  # randomly 3 to 5 seconds after each action
-bot.set_wait_time(0)     # disable the automatic delay
+match = bot.locate("save.png", confidence=0.85, required=False)
+matches = bot.locate_all("item.png", limit=10)
+count = bot.count_images(["one.png", "two.png"])
+
+match = bot.wait_for("save.png", timeout=5)
+match = bot.click_image("save.png", timeout=5)
+match = bot.click_first_available_image(["primary.png", "fallback.png"])
+match = bot.wait_for_and_click("save.png", variation=8, button="right")
+match = bot.click_random_in_image("save.png")
+matches = bot.click_all_images("item.png", variation=4)
 ```
 
-Explicit waiting methods such as `wait()`, `wait_random()`, and `countdown()` do
-not add the automatic action delay.
+Matching methods accept `confidence`, `region`, `grayscale`, and `scales` where
+applicable. Wait/click methods also accept `timeout` and polling `interval`.
+Click helpers forward extra keyword arguments to `click`. `required=True` raises
+`ImageNotFound`; optional searches return `None`. `locate_all` returns a list and
+uses `limit=10` by default; pass `None` for no limit.
 
-Window controls use the operating system's standard shortcut. On macOS,
-`maximize()` enters full screen; on Windows it uses Win+Up; on Linux it uses
-Alt+F10. `minimize()` uses Command+M, Win+Down, or Alt+F9 respectively.
-
-`human-like` state adds varied timing, curved movement, target variation, click
-dwell, and paced scrolling. The default state performs direct input:
+## Waiting and conditional actions
 
 ```python
-bot = ScreenBot(seed=42)
+bot.wait(1.5)
+bot.wait_random(1, 3)
+bot.countdown(3, message="Starting in")
 
-bot.set_human_like()
-bot.click((500, 300))
-bot.write("Human-like typing varies the cadence and corrects occasional typos.")
-
-bot.set_fast()
-bot.click((100, 100))
-
-# Temporarily switch without changing the surrounding mode.
-with bot.using_state(ScreenBot.HUMAN_LIKE):
-    bot.click((100, 100))
-```
-
-Fast mode executes actions directly, aside from the short key dwell used by
-`press()`. The default action delay configured with `set_wait_time()` still
-applies in either mode.
-
-Human-like typing always produces the requested final text. It uses random
-intervals between keystrokes and may type an adjacent key, pause, backspace it,
-and continue with the correct character. Tune or disable mistakes as needed:
-
-```python
-bot.configure_human_like(
-    key_dwell=(0.03, 0.09),
-    key_interval=(0.04, 0.16),
-    typo_chance=0.03,       # probability per eligible letter
-    typo_pause=(0.08, 0.3),
+dialog = bot.wait_until(
+    lambda: bot.locate("dialog.png"),
+    timeout=10,
+    interval=0.2,
+    message="dialog",
 )
-```
-
-Run an action with a percentage chance. A seed makes the sequence repeatable:
-
-```python
-bot = ScreenBot(seed=42)
 
 if bot.chance(5):
     bot.click((500, 300))
-
-bot.run_with_chance(25, bot.write, "This runs about one time in four")
+result = bot.run_with_chance(25, bot.write, "sometimes")
 ```
 
-Percentages are from `0` through `100`. Each call makes an independent choice;
-`0` never runs and `100` always runs. The action's return value is returned when
-it runs, otherwise `run_with_chance()` returns `None`.
+`wait_until` returns the predicate's first truthy value and raises built-in
+`TimeoutError` on expiry. Chance percentages range from `0` through `100`; a
+seed makes decisions repeatable. `run_with_chance` returns the action result or
+`None` when skipped.
 
-### Screenshots and image matching
+## Human-like mode
+
+Human-like mode adds curved movement, timing variation, click dwell, target
+variation, paced scrolling, and optional corrected typing mistakes. It never
+changes the requested final text, key sequence, button, or final destination.
 
 ```python
-bot = ScreenBot(timeout=3)  # Default for wait_for and image-click helpers.
-
-bot.save_screenshot("screen.png")
-bot.save_screenshot("region.png", box)
-bot.capture_template("save-button.png", box)
-
-match = bot.locate("save-button.png", confidence=0.85)
-if match:
-    print(match.center, match.confidence)
-    bot.click(match.center)
-
-bot.click_image("save-button.png", confidence=0.85, timeout=5)
-bot.click_first_available_image(
-    ["primary-button.png", "fallback-button.png"],
-    confidence=0.85,
-)
-bot.wait_for_and_click(
-    "save-button.png",
-    confidence=0.85,
-    timeout=5,
-    variation=8,       # vary around the center, staying inside the image
-    button="right",    # "left" by default
+bot = ScreenBot(state=ScreenBot.HUMAN_LIKE, seed=42)
+bot.configure_human_like(
+    pause=(0.04, 0.16),
+    move_duration=(0.22, 0.72),
+    click_dwell=(0.035, 0.12),
+    key_dwell=(0.035, 0.09),
+    key_interval=(0.035, 0.14),
+    typo_pause=(0.08, 0.32),
+    typo_chance=0.04,
+    scroll_pause=(0.04, 0.13),
+    target_jitter=2,
+    image_padding=3,
+    path_deviation=(0.14, 0.42),
+    speed_variation=(0.35, 2.40),
+    overshoot_chance=0.35,
 )
 ```
 
-`locate_all()` returns multiple matches, `wait_for()` polls until a match appears,
-`click_first_available_image()` checks paths in order and clicks the first visible
-match, `wait_for_and_click()` waits and clicks once, and `click_all_images()` clicks
-all visible matches. Constructor defaults include
-`confidence`, `timeout`, `poll_interval`, `grayscale`, `scales`, and
-`coordinate_file`. The timeout defaults to one second and can be overridden on
-individual calls; use `timeout=0` for an immediate check.
+Probabilities passed to `configure_human_like` range from `0.0` to `1.0`, unlike
+the percentage-based `chance()` method.
 
-### Named points
+## Saved points and interactive capture
 
-For several coordinates in one JSON file, use the named-point API:
+Store several named points in the configured `coordinate_file`:
 
 ```python
-bot = ScreenBot(coordinate_file="screenbot_coords.json")
 bot.save_point("login", (500, 300))
+point = bot.get_point("login")
+points = bot.list_points()
 bot.click_saved("login")
-print(bot.list_points())
-bot.delete_point("login")
+deleted = bot.delete_point("login")
 ```
+
+Standalone portable files use:
+
+```python
+bot.save_position_file("login.json", (500, 300))
+point = bot.load_position_file("login.json")
+bot.save_box_file("toolbar.json", box)
+box = bot.load_box_file("toolbar.json")
+```
+
+Interactive library helpers are `capture_position_on_key`,
+`capture_box_on_key`, `capture_box_on_click`, `print_pos_on_key`,
+`print_pos_on_click`, `print_box_on_key`, and `print_box_on_click`. The key
+capture methods use the `0` key.
+
+`VirtualDir(base).path(*parts)` is a small compatibility helper for building
+paths beneath an asset directory.
+
+## Errors and logging
+
+ScreenBot-specific failures derive from `ScreenBotError`. A required template
+that cannot be found raises `ImageNotFound`. Invalid arguments raise `ValueError`
+or `TypeError`, unreadable files raise a descriptive `ValueError`, and
+`wait_until` raises `TimeoutError`.
+
+Pass `log=True` or call `set_logging()` to write action arguments and results to
+stderr. Supply `log_stream` to redirect those records.
 
 ## Development
 
@@ -350,4 +423,5 @@ uv sync
 make test
 ```
 
-Uninstall the global CLI with `make uninstall`.
+`make test` runs both retained test suites. Uninstall the global CLI with
+`make uninstall`.

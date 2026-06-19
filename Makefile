@@ -7,4 +7,5 @@ uninstall:
 	uv tool uninstall screenbot
 
 test:
+	uv run python -m unittest -v test_screenbot
 	uv run python -m unittest discover -s tests -v

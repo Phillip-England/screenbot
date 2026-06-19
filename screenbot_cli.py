@@ -8,22 +8,15 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from screenbot import ScreenBot
+from screenbot import Box, ScreenBot, __version__
 
 
 def _point_dict(point: ScreenBot.Point) -> dict[str, int]:
-    return {"x": point.x, "y": point.y}
+    return point.as_dict()
 
 
 def _box_dict(box: ScreenBot.Box) -> dict[str, int]:
-    return {
-        "left": box.left,
-        "top": box.top,
-        "right": box.right,
-        "bottom": box.bottom,
-        "width": box.width,
-        "height": box.height,
-    }
+    return box.as_dict()
 
 
 def _print_json(value: Any) -> None:
@@ -47,16 +40,16 @@ def _resolve_box(bot: ScreenBot, args: argparse.Namespace) -> ScreenBot.Box:
         return bot.load_box_file(args.box_file)
     if args.box:
         left, top, right, bottom = args.box
-        return bot.Box((left, top), (right, top), (right, bottom), (left, bottom))
+        return Box.from_ltrb(left, top, right, bottom)
     return bot.capture_box_on_key()
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="screenbot",
-        description="Inspect screen coordinates and colors from scripts.",
+        description="Inspect and automate the desktop from Python or shell scripts.",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.2.0")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("system", help="print this machine's ScreenBot system ID")
@@ -83,6 +76,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="print every pixel in a screen box instead of aggregate counts",
     )
     colors.add_argument("--json", action="store_true", help="print one JSON object per line")
+
+    screenshot = commands.add_parser("screenshot", help="save the screen or a box as an image")
+    screenshot.add_argument("output", type=Path, help="output image path")
+    _add_box_source(screenshot)
+
+    locate = commands.add_parser("locate", help="find an image template on screen")
+    locate.add_argument("image", type=Path, help="template image path")
+    locate.add_argument("--confidence", type=float, default=None)
+    locate.add_argument("--all", action="store_true", help="print every visible match")
+    locate.add_argument("--limit", type=int, default=10, help="maximum matches with --all")
+    locate.add_argument("--json", action="store_true", help="print compact JSON")
     return parser
 
 
@@ -161,6 +165,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{item.count} {item.percentage:.4f}%"
             )
         return 0
+
+    if args.command == "screenshot":
+        region = None if args.box is None and args.box_file is None else _resolve_box(bot, args)
+        print(bot.save_screenshot(args.output, region))
+        return 0
+
+    if args.command == "locate":
+        if args.limit < 1:
+            parser.error("--limit must be at least 1")
+        matches = (
+            bot.locate_all(args.image, confidence=args.confidence, limit=args.limit)
+            if args.all
+            else [match] if (match := bot.locate(args.image, confidence=args.confidence)) else []
+        )
+        for match in matches:
+            data = match.as_dict()
+            _print_json(data) if args.json else print(
+                f"{match.x} {match.y} {match.width} {match.height} {match.confidence:.4f}"
+            )
+        return 0 if matches else 1
 
     return 1
 

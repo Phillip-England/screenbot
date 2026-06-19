@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -9,7 +10,17 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from screenbot import ScreenBot, VirtualDir
+from screenbot import (
+    Box,
+    ColorCount,
+    ImageNotFound,
+    Match,
+    Pixel,
+    Point,
+    ScreenBot,
+    ScreenBotError,
+    VirtualDir,
+)
 from screenbot_cli import main
 
 
@@ -59,6 +70,59 @@ class ScreenBotTests(unittest.TestCase):
 
     def test_pixel_color_defaults_to_mouse(self):
         self.assertEqual(self.bot.pixel_color(), (12, 34, 99))
+
+    def test_public_value_types_and_exceptions_are_importable(self):
+        self.assertIs(Point, ScreenBot.Point)
+        self.assertIs(Box, ScreenBot.Box)
+        self.assertIs(Match, ScreenBot.Match)
+        self.assertIs(ColorCount, ScreenBot.ColorCount)
+        self.assertIs(Pixel, ScreenBot.Pixel)
+        self.assertIs(ScreenBotError, ScreenBot.Error)
+        self.assertIs(ImageNotFound, ScreenBot.ImageNotFound)
+
+    def test_value_types_have_conventional_constructors_and_serializers(self):
+        point = Point(3, 4)
+        box = Box.from_xywh(1, 2, 5, 6)
+
+        self.assertEqual(point.as_dict(), {"x": 3, "y": 4})
+        self.assertEqual(box, Box.from_ltrb(1, 2, 6, 8))
+        self.assertTrue(box.contains(point))
+        self.assertFalse(box.contains((6, 8)))
+        self.assertEqual(box.as_dict()["width"], 5)
+
+    def test_context_manager_stops_kill_listener(self):
+        listener = Mock()
+        bot = ScreenBot(backend=Mock())
+        bot._kill_listener = listener
+
+        with bot as entered:
+            self.assertIs(entered, bot)
+
+        listener.stop.assert_called_once_with()
+
+    def test_pixel_matches_supports_tolerance_and_validates_rgb(self):
+        self.assertTrue(self.bot.pixel_matches((10, 20), (11, 21, 100), tolerance=2))
+        self.assertFalse(self.bot.pixel_matches((10, 20), (11, 21, 100), tolerance=0))
+        with self.assertRaises(ValueError):
+            self.bot.pixel_matches((10, 20), (256, 0, 0))
+
+    def test_hotkey_normalizes_control_and_keycombo_selects_platform(self):
+        backend = Mock()
+        bot = ScreenBot(backend=backend)
+
+        self.assertEqual(bot.hotkey("control", "a"), ("ctrl", "a"))
+        with patch("screenbot.sys.platform", "darwin"):
+            self.assertEqual(bot.keycombo(("ctrl", "p"), ("command", "p")), ("command", "p"))
+
+        self.assertEqual(
+            backend.method_calls,
+            [unittest.mock.call.hotkey("ctrl", "a"), unittest.mock.call.hotkey("command", "p")],
+        )
+
+    def test_wait_until_returns_value_or_times_out(self):
+        self.assertEqual(self.bot.wait_until(lambda: "ready", timeout=0), "ready")
+        with self.assertRaisesRegex(TimeoutError, "waiting for dialog"):
+            self.bot.wait_until(lambda: False, timeout=0, message="dialog")
 
     def test_screen_center_uses_primary_screen_dimensions(self):
         backend = Mock()
@@ -363,6 +427,52 @@ class ScreenBotTests(unittest.TestCase):
             with redirect_stdout(output):
                 self.assertEqual(main(["colors", str(path), "--limit", "1"]), 0)
             self.assertEqual(output.getvalue(), "#0A141E 10 20 30 2 100.0000%\n")
+
+    @patch("screenbot_cli.ScreenBot")
+    def test_screenshot_cli_saves_explicit_box(self, bot_type):
+        bot = bot_type.return_value
+        bot.save_screenshot.return_value = Path("region.png")
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(
+                main(["screenshot", "region.png", "--box", "1", "2", "11", "22"]),
+                0,
+            )
+
+        bot.save_screenshot.assert_called_once_with(
+            Path("region.png"), Box.from_ltrb(1, 2, 11, 22)
+        )
+        self.assertEqual(output.getvalue(), "region.png\n")
+
+    @patch("screenbot_cli.ScreenBot")
+    def test_locate_cli_returns_one_for_no_match(self, bot_type):
+        bot_type.return_value.locate.return_value = None
+
+        self.assertEqual(main(["locate", "missing.png"]), 1)
+
+    @patch("screenbot_cli.ScreenBot")
+    def test_locate_cli_prints_json_match(self, bot_type):
+        match = Match(1, 2, 30, 40, 0.95, "button.png")
+        bot_type.return_value.locate.return_value = match
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(main(["locate", "button.png", "--json"]), 0)
+
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {
+                "x": 1,
+                "y": 2,
+                "width": 30,
+                "height": 40,
+                "confidence": 0.95,
+                "image_path": "button.png",
+                "scale": 1.0,
+                "center": [16, 22],
+            },
+        )
 
 
 if __name__ == "__main__":

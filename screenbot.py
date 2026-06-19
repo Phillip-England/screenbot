@@ -22,7 +22,20 @@ import pyscreeze
 from PIL import Image
 from pynput import keyboard, mouse
 
-__all__ = ["ScreenBot", "VirtualDir"]
+__version__ = "0.3.0"
+
+__all__ = [
+    "Box",
+    "ColorCount",
+    "ImageNotFound",
+    "Match",
+    "Pixel",
+    "Point",
+    "ScreenBot",
+    "ScreenBotError",
+    "VirtualDir",
+    "__version__",
+]
 
 
 def _action(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -95,6 +108,9 @@ class ScreenBot:
         def as_tuple(self) -> tuple[int, int]:
             return self.x, self.y
 
+        def as_dict(self) -> dict[str, int]:
+            return {"x": self.x, "y": self.y}
+
         def offset(self, dx: float = 0, dy: float = 0) -> "ScreenBot.Point":
             return ScreenBot.Point(round(self.x + dx), round(self.y + dy))
 
@@ -161,11 +177,38 @@ class ScreenBot:
         def center(self) -> "ScreenBot.Point":
             return ScreenBot.Point(self.x + self.width // 2, self.y + self.height // 2)
 
+        @classmethod
+        def from_ltrb(cls, left: int, top: int, right: int, bottom: int) -> "ScreenBot.Box":
+            """Build a box from left, top, right, and bottom edges."""
+            return cls((left, top), (right, top), (right, bottom), (left, bottom))
+
+        @classmethod
+        def from_xywh(cls, x: int, y: int, width: int, height: int) -> "ScreenBot.Box":
+            """Build a box from an origin, width, and height."""
+            if width < 0 or height < 0:
+                raise ValueError("width and height must be non-negative")
+            return cls.from_ltrb(x, y, x + width, y + height)
+
         def as_tuple(self) -> tuple["ScreenBot.Point", "ScreenBot.Point", "ScreenBot.Point", "ScreenBot.Point"]:
             return self.top_left, self.top_right, self.bottom_right, self.bottom_left
 
         def as_region_tuple(self) -> tuple[int, int, int, int]:
             return self.x, self.y, self.width, self.height
+
+        def as_dict(self) -> dict[str, int]:
+            return {
+                "left": self.left,
+                "top": self.top,
+                "right": self.right,
+                "bottom": self.bottom,
+                "width": self.width,
+                "height": self.height,
+            }
+
+        def contains(self, point: Any) -> bool:
+            """Return whether a point lies inside this half-open box."""
+            value = ScreenBot._point(point)
+            return self.left <= value.x < self.right and self.top <= value.y < self.bottom
 
     @dataclass(frozen=True)
     class Match:
@@ -295,6 +338,16 @@ class ScreenBot:
         self._backend.FAILSAFE = failsafe
         self._backend.PAUSE = 0
         self.configure_kill_sequence(kill_sequence)
+
+    def __enter__(self) -> "ScreenBot":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Release global listeners owned by this bot. Safe to call repeatedly."""
+        self.stop_kill_listener()
 
     @property
     def state(self) -> str:
@@ -479,6 +532,19 @@ class ScreenBot:
         target = self.mouse_position() if point is None else self._resolve_point(point)
         color = self._backend.pixel(target.x, target.y)
         return tuple(int(channel) for channel in color[:3])
+
+    def pixel_matches(
+        self,
+        point: Any,
+        color: Sequence[int],
+        *,
+        tolerance: int = 0,
+    ) -> bool:
+        """Return whether a screen pixel matches an RGB color within tolerance."""
+        expected = self._rgb(color)
+        allowed = self._integer_non_negative(tolerance, "tolerance")
+        actual = self.pixel_color(point)
+        return all(abs(left - right) <= allowed for left, right in zip(actual, expected))
 
     def colors_in_box(self, box: Any) -> list["ScreenBot.ColorCount"]:
         """Count RGB colors in a screen box, ordered from most common."""
@@ -804,8 +870,10 @@ class ScreenBot:
             finally:
                 self._backend.keyUp(key)
             # Quartz posts keyboard events asynchronously. Give the release
-            # time to reach the OS before a following shortcut is pressed.
+            # time to reach the OS, then reaffirm it in case the first event
+            # was dropped before a following shortcut is pressed.
             self._sleep(self.key_release_duration)
+            self._backend.keyUp(key)
             if index + 1 < count:
                 self._sleep(
                     self._human_interval(interval, self.human_key_interval)
@@ -902,68 +970,33 @@ class ScreenBot:
 
     @_action
     def hotkey(self, *keys: str) -> tuple[str, ...]:
+        """Press a key combination and return its normalized keys."""
         if not keys:
             raise ValueError("hotkey requires at least one key")
+        normalized = tuple("ctrl" if key.lower() == "control" else key for key in keys)
         if not self.is_human_like:
-            self._backend.hotkey(*keys)
-            return tuple(keys)
+            self._backend.hotkey(*normalized)
+            return normalized
         self._pause(self.human_pause)
-        for key in keys:
+        for key in normalized:
             self._backend.keyDown(key)
             self._pause(self.human_key_interval, factor=0.35)
-        for key in reversed(keys):
+        for key in reversed(normalized):
             self._backend.keyUp(key)
             self._pause(self.human_key_interval, factor=0.25)
         self._pause(self.human_pause, factor=0.4)
-        return tuple(keys)
+        return normalized
 
-    def close_window(self) -> tuple[str, str]:
-        keys = ("command" if sys.platform == "darwin" else "ctrl", "w")
-        self.hotkey(*keys)
-        return keys
-
-    def websearch(self) -> tuple[str, str]:
-        """Focus the address/search bar in the active browser window."""
-        keys = ("command" if sys.platform == "darwin" else "ctrl", "l")
-        return self.hotkey(*keys)
-
-    def maximize(self) -> tuple[str, ...]:
-        """Maximize the active window using the current platform's shortcut."""
-        if sys.platform == "darwin":
-            keys = ("ctrl", "command", "f")
-        elif sys.platform == "win32":
-            keys = ("win", "up")
-        else:
-            keys = ("alt", "f10")
-        return self.hotkey(*keys)
-
-    def minimize(self) -> tuple[str, ...]:
-        """Minimize the active window using the current platform's shortcut."""
-        if sys.platform == "darwin":
-            keys = ("command", "m")
-        elif sys.platform == "win32":
-            keys = ("win", "down")
-        else:
-            keys = ("alt", "f9")
-        return self.hotkey(*keys)
-
-    def zoom_in(
+    def keycombo(
         self,
-        steps: int = 1,
-        *,
-        interval: float | tuple[float, float] = 0.0,
-    ) -> int:
-        """Zoom in by a number of application/browser zoom steps."""
-        return self._zoom("+", steps, interval)
-
-    def zoom_out(
-        self,
-        steps: int = 1,
-        *,
-        interval: float | tuple[float, float] = 0.0,
-    ) -> int:
-        """Zoom out by a number of application/browser zoom steps."""
-        return self._zoom("-", steps, interval)
+        windows_linux: Sequence[str],
+        macos: Sequence[str],
+    ) -> tuple[str, ...]:
+        """Press the shortcut for the current operating system."""
+        if not windows_linux or not macos:
+            raise ValueError("keycombo requires a non-empty combo for each platform")
+        selected = macos if sys.platform == "darwin" else windows_linux
+        return self.hotkey(*selected)
 
     # Image matching -----------------------------------------------------
 
@@ -1277,6 +1310,28 @@ class ScreenBot:
         self._sleep(duration)
         return duration
 
+    def wait_until(
+        self,
+        predicate: Callable[[], Any],
+        *,
+        timeout: Optional[float] = None,
+        interval: Optional[float] = None,
+        message: str = "condition",
+    ) -> Any:
+        """Poll a callable until it returns a truthy value, then return that value."""
+        if not callable(predicate):
+            raise TypeError("predicate must be callable")
+        wait = self.timeout if timeout is None else self._non_negative(timeout, "timeout")
+        poll = self.poll_interval if interval is None else self._non_negative(interval, "interval")
+        deadline = time.monotonic() + wait
+        while True:
+            result = predicate()
+            if result:
+                return result
+            if wait <= 0 or time.monotonic() >= deadline:
+                raise TimeoutError(f"Timed out after {wait:.2f}s waiting for {message}")
+            self._sleep(min(poll, max(0.0, deadline - time.monotonic())))
+
     def capture_position_on_key(self, *, announce: bool = True) -> "ScreenBot.Point":
         """Return the pointer position when 0 is pressed."""
         points: list[ScreenBot.Point] = []
@@ -1419,26 +1474,6 @@ class ScreenBot:
         self._human_move(target, move_duration)
         self._pause(self.human_pause, factor=0.35)
         return target
-
-    def _zoom(
-        self,
-        key: str,
-        steps: int,
-        interval: float | tuple[float, float],
-    ) -> int:
-        count = self._positive_integer(steps, "steps")
-        if isinstance(interval, tuple):
-            delay_range = self._range(interval, "interval")
-        else:
-            delay = self._non_negative(interval, "interval")
-            delay_range = (delay, delay)
-
-        modifier = "command" if sys.platform == "darwin" else "ctrl"
-        for index in range(count):
-            self.hotkey(modifier, key)
-            if index + 1 < count:
-                self._sleep(self._random.uniform(*delay_range))
-        return count
 
     def _human_move(self, target: "ScreenBot.Point", duration: Optional[float]) -> None:
         start = self.mouse_position()
@@ -1952,6 +1987,19 @@ class ScreenBot:
         return number
 
     @staticmethod
+    def _rgb(value: Sequence[int]) -> tuple[int, int, int]:
+        try:
+            channels = tuple(value)
+        except TypeError as error:
+            raise TypeError("color must be an RGB sequence") from error
+        if len(channels) != 3 or any(
+            isinstance(channel, bool) or not isinstance(channel, int) or not 0 <= channel <= 255
+            for channel in channels
+        ):
+            raise ValueError("color must contain three integer channels from 0 to 255")
+        return channels
+
+    @staticmethod
     def _validate_scales(scales: Sequence[float]) -> tuple[float, ...]:
         values = tuple(float(scale) for scale in scales)
         if not values or any(scale <= 0 for scale in values):
@@ -1965,3 +2013,14 @@ class ScreenBot:
         intersection = width * height
         union = a.width * a.height + b.width * b.height - intersection
         return intersection / union if union else 0.0
+
+
+# Public value types live at module level in normal library APIs. The aliases keep
+# the original ScreenBot.Point/Box access style fully backward compatible.
+Point = ScreenBot.Point
+Box = ScreenBot.Box
+Match = ScreenBot.Match
+ColorCount = ScreenBot.ColorCount
+Pixel = ScreenBot.Pixel
+ScreenBotError = ScreenBot.Error
+ImageNotFound = ScreenBot.ImageNotFound
