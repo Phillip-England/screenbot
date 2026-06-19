@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence, TextIO
 
 import pyautogui
 import pyscreeze
@@ -33,8 +33,14 @@ def _action(method: Callable[..., Any]) -> Callable[..., Any]:
         self._action_depth += 1
         try:
             result = method(self, *args, **kwargs)
+        except Exception as error:
+            if outermost:
+                self._log_operation(method.__name__, args, kwargs, error=error)
+            raise
         finally:
             self._action_depth -= 1
+        if outermost:
+            self._log_operation(method.__name__, args, kwargs, result=result)
         if outermost and not kwargs.get("dry_run", False):
             self._wait_after_action()
         return result
@@ -231,6 +237,7 @@ class ScreenBot:
         confidence: float = 0.80,
         timeout: float = 1.0,
         poll_interval: float = 0.25,
+        key_press_duration: float = 0.05,
         grayscale: bool = True,
         scales: Sequence[float] = (1.0,),
         coordinate_file: str | Path = "screenbot_coords.json",
@@ -240,10 +247,17 @@ class ScreenBot:
         backend: Any = None,
         sleeper: Any = time.sleep,
         system_id: Optional[str] = None,
+        log: bool = False,
+        log_stream: Optional[TextIO] = None,
     ) -> None:
+        self.log = bool(log)
+        self.log_stream = sys.stderr if log_stream is None else log_stream
         self.confidence = self._confidence(confidence)
         self.timeout = self._non_negative(timeout, "timeout")
         self.poll_interval = self._non_negative(poll_interval, "poll_interval")
+        self.key_press_duration = self._non_negative(
+            key_press_duration, "key_press_duration"
+        )
         self.grayscale = bool(grayscale)
         self.scales = self._validate_scales(scales)
         self.coordinate_file = Path(coordinate_file)
@@ -263,6 +277,7 @@ class ScreenBot:
         self.human_pause = (0.04, 0.16)
         self.human_move_duration = (0.22, 0.72)
         self.human_click_dwell = (0.035, 0.12)
+        self.human_key_dwell = (0.035, 0.09)
         self.human_key_interval = (0.035, 0.14)
         self.human_typo_pause = (0.08, 0.32)
         self.human_typo_chance = 0.04
@@ -297,6 +312,11 @@ class ScreenBot:
     def set_fast(self) -> "ScreenBot":
         """Enable immediate input behavior without human-like semantics."""
         return self.set_state(self.DEFAULT)
+
+    def set_logging(self, enabled: bool = True) -> "ScreenBot":
+        """Enable or disable terminal logging and return this bot."""
+        self.log = bool(enabled)
+        return self
 
     @contextmanager
     def using_state(self, state: str) -> Iterator["ScreenBot"]:
@@ -388,6 +408,7 @@ class ScreenBot:
         pause: Optional[tuple[float, float]] = None,
         move_duration: Optional[tuple[float, float]] = None,
         click_dwell: Optional[tuple[float, float]] = None,
+        key_dwell: Optional[tuple[float, float]] = None,
         key_interval: Optional[tuple[float, float]] = None,
         typo_pause: Optional[tuple[float, float]] = None,
         typo_chance: Optional[float] = None,
@@ -403,6 +424,7 @@ class ScreenBot:
             ("human_pause", pause),
             ("human_move_duration", move_duration),
             ("human_click_dwell", click_dwell),
+            ("human_key_dwell", key_dwell),
             ("human_key_interval", key_interval),
             ("human_typo_pause", typo_pause),
             ("human_scroll_pause", scroll_pause),
@@ -759,19 +781,105 @@ class ScreenBot:
 
     @_action
     def press(self, key: str, *, presses: int = 1, interval: Optional[float] = None) -> str:
+        """Press and release a key, with a short dwell between both events."""
         count = self._positive_integer(presses, "presses")
-        if not self.is_human_like:
-            self._backend.press(key, presses=count, interval=0 if interval is None else interval)
-            return key
-        self._pause(self.human_pause)
+        repeat_delay = self._non_negative(
+            0 if interval is None else interval, "interval"
+        )
+        if self.is_human_like:
+            self._pause(self.human_pause)
         for index in range(count):
             self._backend.keyDown(key)
-            self._pause(self.human_click_dwell, factor=0.6)
-            self._backend.keyUp(key)
+            try:
+                dwell = (
+                    self._random.uniform(*self.human_key_dwell)
+                    if self.is_human_like
+                    else self.key_press_duration
+                )
+                self._sleep(dwell)
+            finally:
+                self._backend.keyUp(key)
             if index + 1 < count:
-                self._sleep(self._human_interval(interval, self.human_key_interval))
-        self._pause(self.human_pause, factor=0.4)
+                self._sleep(
+                    self._human_interval(interval, self.human_key_interval)
+                    if self.is_human_like else repeat_delay
+                )
+        if self.is_human_like:
+            self._pause(self.human_pause, factor=0.4)
         return key
+
+    def press_and_release(
+        self, key: str, *, presses: int = 1, interval: Optional[float] = None
+    ) -> str:
+        """Explicit alias for :meth:`press`."""
+        return self.press(key, presses=presses, interval=interval)
+
+    def press_arrow_up(self, **kwargs: Any) -> str:
+        """Press the Up Arrow key."""
+        return self.press("up", **kwargs)
+
+    def press_arrow_down(self, **kwargs: Any) -> str:
+        """Press the Down Arrow key."""
+        return self.press("down", **kwargs)
+
+    def press_arrow_left(self, **kwargs: Any) -> str:
+        """Press the Left Arrow key."""
+        return self.press("left", **kwargs)
+
+    def press_arrow_right(self, **kwargs: Any) -> str:
+        """Press the Right Arrow key."""
+        return self.press("right", **kwargs)
+
+    def press_enter(self, **kwargs: Any) -> str:
+        """Press the Enter or Return key."""
+        return self.press("enter", **kwargs)
+
+    def press_escape(self, **kwargs: Any) -> str:
+        """Press the Escape key."""
+        return self.press("esc", **kwargs)
+
+    def press_tab(self, **kwargs: Any) -> str:
+        """Press the Tab key."""
+        return self.press("tab", **kwargs)
+
+    def press_space(self, **kwargs: Any) -> str:
+        """Press the Space key."""
+        return self.press("space", **kwargs)
+
+    def press_backspace(self, **kwargs: Any) -> str:
+        """Press the Backspace key."""
+        return self.press("backspace", **kwargs)
+
+    def press_delete(self, **kwargs: Any) -> str:
+        """Press the forward Delete key."""
+        return self.press("delete", **kwargs)
+
+    def press_insert(self, **kwargs: Any) -> str:
+        """Press the Insert key."""
+        return self.press("insert", **kwargs)
+
+    def press_home(self, **kwargs: Any) -> str:
+        """Press the Home key."""
+        return self.press("home", **kwargs)
+
+    def press_end(self, **kwargs: Any) -> str:
+        """Press the End key."""
+        return self.press("end", **kwargs)
+
+    def press_page_up(self, **kwargs: Any) -> str:
+        """Press the Page Up key."""
+        return self.press("pageup", **kwargs)
+
+    def press_page_down(self, **kwargs: Any) -> str:
+        """Press the Page Down key."""
+        return self.press("pagedown", **kwargs)
+
+    def press_function_key(self, number: int, **kwargs: Any) -> str:
+        """Press an F1 through F24 function key."""
+        key_number = self._positive_integer(number, "function key number")
+        if key_number > 24:
+            raise ValueError("function key number must be between 1 and 24")
+        return self.press(f"f{key_number}", **kwargs)
 
     @_action
     def hold(self, key: str) -> str:
@@ -868,6 +976,10 @@ class ScreenBot:
             self.grayscale if grayscale is None else grayscale,
             self.scales if scales is None else self._validate_scales(scales),
         )
+        self._log_message(
+            f"locate({str(image_path)!r}) -> {match!r}" if match is not None
+            else f"locate({str(image_path)!r}) -> no match"
+        )
         if match is None and required:
             raise self.ImageNotFound(
                 f"Could not find {str(image_path)!r} at confidence >= {threshold:.2f}"
@@ -885,12 +997,14 @@ class ScreenBot:
         limit: Optional[int] = 10,
     ) -> list["ScreenBot.Match"]:
         threshold = self.confidence if confidence is None else self._confidence(confidence)
-        return self._locate_all_once(
+        matches = self._locate_all_once(
             image_path, threshold, region,
             self.grayscale if grayscale is None else grayscale,
             self.scales if scales is None else self._validate_scales(scales),
             None if limit is None else self._positive_integer(limit, "limit"),
         )
+        self._log_message(f"locate_all({str(image_path)!r}) -> {len(matches)} matches")
+        return matches
 
     def count_images(
         self,
@@ -972,6 +1086,40 @@ class ScreenBot:
             target = match.center
         self.click(target, **click_kwargs)
         return match
+
+    def click_first_available_image(
+        self,
+        image_paths: Sequence[str | Path],
+        *,
+        confidence: Optional[float] = None,
+        region: Any = None,
+        grayscale: Optional[bool] = None,
+        scales: Optional[Sequence[float]] = None,
+        required: bool = True,
+        random_point: Optional[bool] = None,
+        padding: Optional[int] = None,
+        **click_kwargs: Any,
+    ) -> Optional["ScreenBot.Match"]:
+        """Click the first currently visible image, in the provided order."""
+        for image_path in image_paths:
+            match = self.click_image(
+                image_path,
+                confidence=confidence,
+                timeout=0,
+                region=region,
+                grayscale=grayscale,
+                scales=scales,
+                required=False,
+                random_point=random_point,
+                padding=padding,
+                **click_kwargs,
+            )
+            if match is not None:
+                return match
+
+        if required:
+            raise self.ImageNotFound("Could not find any of the provided images")
+        return None
 
     def wait_for_and_click(
         self,
@@ -1111,12 +1259,14 @@ class ScreenBot:
     def wait(self, seconds: float) -> float:
         """Wait for an exact number of seconds and return that duration."""
         duration = self._non_negative(seconds, "seconds")
+        self._log_message(f"wait(seconds={duration!r})")
         self._sleep(duration)
         return duration
 
     def wait_random(self, minimum: float, maximum: float) -> float:
         """Wait for a random duration in the inclusive range and return it."""
         duration = self._random.uniform(*self._range((minimum, maximum), "wait range"))
+        self._log_message(f"wait_random({minimum!r}, {maximum!r}) -> {duration!r} seconds")
         self._sleep(duration)
         return duration
 
@@ -1211,6 +1361,27 @@ class ScreenBot:
         return self.print_box_on_key()
 
     # Internals ----------------------------------------------------------
+
+    def _log_message(self, message: str) -> None:
+        if self.log:
+            print(f"[ScreenBot] {message}", file=self.log_stream, flush=True)
+
+    def _log_operation(
+        self,
+        name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        result: Any = None,
+        error: Optional[Exception] = None,
+    ) -> None:
+        arguments = [repr(value) for value in args]
+        arguments.extend(f"{key}={value!r}" for key, value in kwargs.items())
+        call = f"{name}({', '.join(arguments)})"
+        if error is not None:
+            self._log_message(f"{call} -> {type(error).__name__}: {error}")
+        else:
+            self._log_message(f"{call} -> {result!r}")
 
     def _move_mouse_direction(
         self,

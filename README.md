@@ -171,6 +171,8 @@ for item in bot.colors_in_image("screenshot.png"):
 ### Automation
 
 ```python
+bot = ScreenBot(log=True)  # print each action to the terminal
+
 bot.click((500, 300))
 bot.double_click((500, 300))
 bot.right_click((500, 300))
@@ -187,12 +189,43 @@ bot.minimize()  # active window
 bot.websearch()  # focus the active browser's address/search bar
 
 bot.write("hello")
-bot.press("enter")
+bot.press("enter")  # key down, short dwell, then key up
+bot.press_and_release("enter")  # explicit name for the same behavior
+bot.press_arrow_up()
+bot.press_arrow_down(presses=3, interval=0.1)
+bot.press_arrow_left()
+bot.press_arrow_right()
+bot.press_enter()
+bot.press_escape()
+bot.press_tab()
+bot.press_space()
+bot.press_backspace()
+bot.press_delete()
+bot.press_insert()
+bot.press_home()
+bot.press_end()
+bot.press_page_up()
+bot.press_page_down()
+bot.press_function_key(5)  # F1 through F24
 bot.hold("shift")
 bot.press("a")
 bot.release("shift")
 bot.hotkey("command", "a")  # use "ctrl" on Linux/Windows
 ```
+
+`press()` and `press_and_release()` always send separate key-down and key-up
+events. Fast mode uses `key_press_duration` (0.05 seconds by default) between
+them; human-like mode randomizes the dwell using `human_key_dwell`. Use `hold()`
+when a key must remain down, then pair it with `release()`.
+
+Logging is disabled by default. Pass `log=True` to the constructor, or toggle it
+while a bot is running with `bot.set_logging()` and `bot.set_logging(False)`.
+Actions include their arguments and resolved result; image searches report their
+matches, and waits report their duration. Logs are written to stderr by default.
+
+The named special-key methods use PyAutoGUI's portable key names and work on
+macOS, Windows, and Linux. They accept the same `presses` and `interval` options
+as `press()`; operating systems may reserve some function-key combinations.
 
 Set an automatic delay after every mouse or keyboard action. Pass one value for
 an exact delay, or two values for a random delay in that inclusive range:
@@ -228,9 +261,9 @@ with bot.using_state(ScreenBot.HUMAN_LIKE):
     bot.click((100, 100))
 ```
 
-Fast mode executes mouse and keyboard input immediately unless an explicit
-duration or interval is supplied. The default action delay configured with
-`set_wait_time()` still applies in either mode.
+Fast mode executes actions directly, aside from the short key dwell used by
+`press()`. The default action delay configured with `set_wait_time()` still
+applies in either mode.
 
 Human-like typing always produces the requested final text. It uses random
 intervals between keystrokes and may type an adjacent key, pause, backspace it,
@@ -238,6 +271,7 @@ and continue with the correct character. Tune or disable mistakes as needed:
 
 ```python
 bot.configure_human_like(
+    key_dwell=(0.03, 0.09),
     key_interval=(0.04, 0.16),
     typo_chance=0.03,       # probability per eligible letter
     typo_pause=(0.08, 0.3),
@@ -274,6 +308,10 @@ if match:
     bot.click(match.center)
 
 bot.click_image("save-button.png", confidence=0.85, timeout=5)
+bot.click_first_available_image(
+    ["primary-button.png", "fallback-button.png"],
+    confidence=0.85,
+)
 bot.wait_for_and_click(
     "save-button.png",
     confidence=0.85,
@@ -284,8 +322,9 @@ bot.wait_for_and_click(
 ```
 
 `locate_all()` returns multiple matches, `wait_for()` polls until a match appears,
-`wait_for_and_click()` waits and clicks once, and `click_all_images()` clicks all
-visible matches. Constructor defaults include
+`click_first_available_image()` checks paths in order and clicks the first visible
+match, `wait_for_and_click()` waits and clicks once, and `click_all_images()` clicks
+all visible matches. Constructor defaults include
 `confidence`, `timeout`, `poll_interval`, `grayscale`, `scales`, and
 `coordinate_file`. The timeout defaults to one second and can be overridden on
 individual calls; use `timeout=0` for an immediate check.
