@@ -1,4 +1,5 @@
 import io
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -8,8 +9,26 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from screenbot import ScreenBot
+from screenbot import ScreenBot, VirtualDir
 from screenbot_cli import main
+
+
+class VirtualDirTests(unittest.TestCase):
+    def test_path_joins_components_under_directory(self):
+        directory = VirtualDir("./static")
+
+        self.assertEqual(
+            directory.path("img", "some-img.png"),
+            os.path.join("./static", "img", "some-img.png"),
+        )
+
+    def test_path_accepts_pathlike_components(self):
+        directory = VirtualDir(Path("assets"))
+
+        self.assertEqual(
+            directory.path(Path("icons"), Path("save.png")),
+            os.path.join("assets", "icons", "save.png"),
+        )
 
 
 class FakePoint:

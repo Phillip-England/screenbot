@@ -20,7 +20,18 @@ import pyscreeze
 from PIL import Image
 from pynput import keyboard, mouse
 
-__all__ = ["ScreenBot"]
+__all__ = ["ScreenBot", "VirtualDir"]
+
+
+class VirtualDir:
+    """Provide convenient access to paths beneath a base directory."""
+
+    def __init__(self, directory: str | os.PathLike[str]) -> None:
+        self.directory = os.fspath(directory)
+
+    def path(self, *parts: str | os.PathLike[str]) -> str:
+        """Return a platform-native path relative to this directory."""
+        return os.path.join(self.directory, *(os.fspath(part) for part in parts))
 
 
 class ScreenBot:

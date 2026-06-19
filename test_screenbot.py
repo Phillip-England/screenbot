@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,7 +9,25 @@ from unittest.mock import Mock, call, patch
 from PIL import Image
 from pyscreeze import ImageNotFoundException as PyScreezeImageNotFound
 
-from screenbot import ScreenBot
+from screenbot import ScreenBot, VirtualDir
+
+
+class VirtualDirTests(unittest.TestCase):
+    def test_path_joins_components_under_directory(self) -> None:
+        directory = VirtualDir("./static")
+
+        self.assertEqual(
+            directory.path("img", "some-img.png"),
+            os.path.join("./static", "img", "some-img.png"),
+        )
+
+    def test_path_accepts_pathlike_components(self) -> None:
+        directory = VirtualDir(Path("assets"))
+
+        self.assertEqual(
+            directory.path(Path("icons"), Path("save.png")),
+            os.path.join("assets", "icons", "save.png"),
+        )
 
 
 class KeyboardTests(unittest.TestCase):
