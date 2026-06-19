@@ -304,6 +304,49 @@ class ImageClickAllTests(unittest.TestCase):
             bot.click_all_images("unused.png", variation=-1)
 
 
+class WaitForAndClickTests(unittest.TestCase):
+    def test_waits_then_right_clicks_with_variation_inside_image(self) -> None:
+        backend = Mock()
+        backend.locateOnScreen.side_effect = [
+            None,
+            SimpleNamespace(left=100, top=200, width=12, height=8),
+        ]
+        bot = ScreenBot(backend=backend, seed=7)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "button.png"
+            Image.new("RGB", (4, 4)).save(path)
+            match = bot.wait_for_and_click(
+                path, timeout=1, interval=0, variation=20, button="right"
+            )
+
+        self.assertIsNotNone(match)
+        self.assertEqual(backend.locateOnScreen.call_count, 2)
+        click = backend.click.call_args.kwargs
+        self.assertTrue(100 <= click["x"] < 112)
+        self.assertTrue(200 <= click["y"] < 208)
+        self.assertEqual(click["button"], "right")
+
+    def test_optional_missing_image_does_not_click(self) -> None:
+        backend = Mock()
+        backend.locateOnScreen.return_value = None
+        bot = ScreenBot(backend=backend)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "button.png"
+            Image.new("RGB", (4, 4)).save(path)
+            match = bot.wait_for_and_click(path, timeout=0, required=False)
+
+        self.assertIsNone(match)
+        backend.click.assert_not_called()
+
+    def test_rejects_negative_variation(self) -> None:
+        bot = ScreenBot(backend=Mock())
+
+        with self.assertRaisesRegex(ValueError, "variation"):
+            bot.wait_for_and_click("unused.png", variation=-1)
+
+
 class CoordinateFileTests(unittest.TestCase):
     def test_position_file_round_trip_and_direct_click(self) -> None:
         backend = Mock()

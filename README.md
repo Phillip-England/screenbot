@@ -271,10 +271,18 @@ if match:
     bot.click(match.center)
 
 bot.click_image("save-button.png", confidence=0.85, timeout=5)
+bot.wait_for_and_click(
+    "save-button.png",
+    confidence=0.85,
+    timeout=5,
+    variation=8,       # vary around the center, staying inside the image
+    button="right",    # "left" by default
+)
 ```
 
 `locate_all()` returns multiple matches, `wait_for()` polls until a match appears,
-and `click_all_images()` clicks all visible matches. Constructor defaults include
+`wait_for_and_click()` waits and clicks once, and `click_all_images()` clicks all
+visible matches. Constructor defaults include
 `confidence`, `timeout`, `poll_interval`, `grayscale`, `scales`, and
 `coordinate_file`.
 

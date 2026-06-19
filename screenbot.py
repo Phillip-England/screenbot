@@ -968,6 +968,41 @@ class ScreenBot:
         self.click(target, **click_kwargs)
         return match
 
+    def wait_for_and_click(
+        self,
+        image_path: str | Path,
+        *,
+        confidence: Optional[float] = None,
+        timeout: Optional[float] = None,
+        interval: Optional[float] = None,
+        region: Any = None,
+        grayscale: Optional[bool] = None,
+        scales: Optional[Sequence[float]] = None,
+        required: bool = True,
+        variation: int = 0,
+        button: str = "left",
+        **click_kwargs: Any,
+    ) -> Optional["ScreenBot.Match"]:
+        """Wait for an image, then click near its center without leaving it."""
+        radius = self._integer_non_negative(variation, "variation")
+        match = self.wait_for(
+            image_path,
+            confidence=confidence,
+            timeout=timeout,
+            interval=interval,
+            region=region,
+            grayscale=grayscale,
+            scales=scales,
+            required=required,
+        )
+        if match is None:
+            return None
+
+        target = self._point_near_center(match.box, radius)
+        click_kwargs.setdefault("jitter", 0)
+        self.click(target, button=button, **click_kwargs)
+        return match
+
     def click_random_in_image(self, image_path: str | Path, **kwargs: Any) -> Optional["ScreenBot.Match"]:
         kwargs["random_point"] = True
         return self.click_image(image_path, **kwargs)
