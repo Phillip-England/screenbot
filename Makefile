@@ -1,7 +1,7 @@
 .PHONY: install uninstall test
 
 install:
-	uv tool install --force .
+	uv tool install --force --no-cache .
 
 uninstall:
 	uv tool uninstall screenbot
