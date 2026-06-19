@@ -258,7 +258,7 @@ class ImageClickAllTests(unittest.TestCase):
 class CoordinateFileTests(unittest.TestCase):
     def test_position_file_round_trip_and_direct_click(self) -> None:
         backend = Mock()
-        bot = ScreenBot(backend=backend)
+        bot = ScreenBot(backend=backend, system_id="workstation-a")
 
         with TemporaryDirectory() as directory:
             path = Path(directory) / "buttons" / "login.pos"
@@ -267,7 +267,10 @@ class CoordinateFileTests(unittest.TestCase):
             self.assertEqual(saved, ScreenBot.Point(120, 75))
             self.assertEqual(bot.load_position_file(path), saved)
             self.assertEqual(bot.click(path), saved)
-            self.assertEqual(json.loads(path.read_text()), {"x": 120, "y": 75})
+            self.assertEqual(json.loads(path.read_text()), {
+                "type": "position",
+                "systems": {"workstation-a": {"x": 120, "y": 75}},
+            })
 
         backend.click.assert_called_once_with(
             x=120, y=75, clicks=1, interval=0.0, button="left"
@@ -315,8 +318,47 @@ class CoordinateFileTests(unittest.TestCase):
             path = Path(directory) / "bad.pos"
             path.write_text('{"left": 1, "top": 2}')
 
-            with self.assertRaisesRegex(ValueError, "Position file"):
+            with self.assertRaisesRegex(ValueError, "position file"):
                 bot.load_position_file(path)
+
+    def test_coordinate_file_merges_and_selects_system_entries(self) -> None:
+        first = ScreenBot(backend=Mock(), system_id="workstation-a")
+        second = ScreenBot(backend=Mock(), system_id="workstation-b")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "login.json"
+            first.save_position_file(path, (10, 20))
+            second.save_position_file(path, (30, 40))
+
+            self.assertEqual(first.load_position_file(path), ScreenBot.Point(10, 20))
+            self.assertEqual(second.load_position_file(path), ScreenBot.Point(30, 40))
+            self.assertEqual(json.loads(path.read_text())["systems"], {
+                "workstation-a": {"x": 10, "y": 20},
+                "workstation-b": {"x": 30, "y": 40},
+            })
+
+    def test_coordinate_file_rejects_unsaved_system(self) -> None:
+        first = ScreenBot(backend=Mock(), system_id="workstation-a")
+        second = ScreenBot(backend=Mock(), system_id="workstation-b")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "toolbar.json"
+            first.save_box_file(path, ((1, 2), (5, 2), (5, 7), (1, 7)))
+
+            with self.assertRaisesRegex(ValueError, "No box saved.*workstation-b"):
+                second.load_box_file(path)
+
+    def test_legacy_coordinate_files_remain_readable(self) -> None:
+        bot = ScreenBot(backend=Mock(), system_id="workstation-a")
+
+        with TemporaryDirectory() as directory:
+            position = Path(directory) / "position.json"
+            box = Path(directory) / "box.json"
+            position.write_text('{"x": 4, "y": 9}')
+            box.write_text('{"left": 1, "top": 2, "right": 5, "bottom": 7}')
+
+            self.assertEqual(bot.load_position_file(position), ScreenBot.Point(4, 9))
+            self.assertEqual(bot.load_box_file(box).as_region_tuple(), (1, 2, 4, 5))
 
 
 if __name__ == "__main__":

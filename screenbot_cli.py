@@ -59,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version="%(prog)s 0.2.0")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    commands.add_parser("system", help="print this machine's ScreenBot system ID")
+
     mouse = commands.add_parser("mouse", help="print positions each time 0 is pressed")
     mouse.add_argument("--save", type=Path, metavar="FILE", help="save as a position JSON file")
     mouse.add_argument("--json", action="store_true", help="print compact JSON")
@@ -88,6 +90,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     bot = ScreenBot()
+
+    if args.command == "system":
+        print(bot.system_id)
+        return 0
 
     if args.command == "mouse":
         print(

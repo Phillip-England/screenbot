@@ -9,6 +9,7 @@ import random
 import signal
 import sys
 import time
+import uuid
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -46,6 +47,7 @@ class ScreenBot:
     DEFAULT = "default"
     HUMAN_LIKE = "human-like"
     STATES = (DEFAULT, HUMAN_LIKE)
+    SYSTEM_ID_ENV = "SCREENBOT_SYSTEM_ID"
 
     class Error(Exception):
         """Base exception for ScreenBot operations."""
@@ -211,6 +213,7 @@ class ScreenBot:
         kill_sequence: Optional[str] = None,
         backend: Any = None,
         sleeper: Any = time.sleep,
+        system_id: Optional[str] = None,
     ) -> None:
         self.confidence = self._confidence(confidence)
         self.timeout = self._non_negative(timeout, "timeout")
@@ -218,6 +221,7 @@ class ScreenBot:
         self.grayscale = bool(grayscale)
         self.scales = self._validate_scales(scales)
         self.coordinate_file = Path(coordinate_file)
+        self.system_id = self._resolve_system_id(system_id)
         self._backend = backend or pyautogui
         self._display_scale: Optional[tuple[float, float]] = None
         self._sleep = sleeper
@@ -379,7 +383,7 @@ class ScreenBot:
         return self.Point(int(point.x), int(point.y))
 
     def screenshot(self, region: Any = None) -> Image.Image:
-        box = None if region is None else self._box(region)
+        box = None if region is None else self._resolve_box(region)
         return self._backend.screenshot(region=None if box is None else box.as_region_tuple())
 
     def save_screenshot(self, path: str | Path, region: Any = None) -> Path:
@@ -390,13 +394,13 @@ class ScreenBot:
 
     def pixel_color(self, point: Any = None) -> tuple[int, int, int]:
         """Return the RGB color at a screen point, or at the mouse position."""
-        target = self.mouse_position() if point is None else self._point(point)
+        target = self.mouse_position() if point is None else self._resolve_point(point)
         color = self._backend.pixel(target.x, target.y)
         return tuple(int(channel) for channel in color[:3])
 
     def colors_in_box(self, box: Any) -> list["ScreenBot.ColorCount"]:
         """Count RGB colors in a screen box, ordered from most common."""
-        return self._color_counts(self.screenshot(self._box(box)))
+        return self._color_counts(self.screenshot(self._resolve_box(box)))
 
     def colors_in_image(self, path: str | Path) -> list["ScreenBot.ColorCount"]:
         """Count RGB colors in an image file, ordered from most common."""
@@ -410,7 +414,7 @@ class ScreenBot:
 
     def pixels_in_box(self, box: Any) -> Iterator["ScreenBot.Pixel"]:
         """Yield every pixel in a screen box in row-major order."""
-        area = self._box(box)
+        area = self._resolve_box(box)
         image = self.screenshot(area).convert("RGB")
         try:
             for y in range(image.height):
@@ -421,10 +425,10 @@ class ScreenBot:
             image.close()
 
     def capture_template(self, path: str | Path, box: Any) -> Path:
-        return self.save_screenshot(path, self._box(box))
+        return self.save_screenshot(path, self._resolve_box(box))
 
     def move_to(self, point: Any, *, duration: Optional[float] = None) -> "ScreenBot.Point":
-        target = self._point(point)
+        target = self._resolve_point(point)
         if not self.is_human_like:
             self._backend.moveTo(target.x, target.y, duration=0 if duration is None else duration)
             return target
@@ -488,7 +492,7 @@ class ScreenBot:
         dry_run: bool = False,
     ) -> "ScreenBot.Point":
         """Move and click. Human-like mode adds pathing, pauses, and click dwell."""
-        base = self.mouse_position() if point is None else self._point(point)
+        base = self.mouse_position() if point is None else self._resolve_point(point)
         radius = self.human_target_jitter if jitter is None and self.is_human_like else (jitter or 0)
         target = base.offset(offset[0], offset[1])
         if radius:
@@ -519,7 +523,7 @@ class ScreenBot:
         return self.click((x, y), **kwargs)
 
     def click_box(self, box: Any, *, padding: int = 0, **kwargs: Any) -> "ScreenBot.Point":
-        return self.click(self._random_point_in_box(self._box(box), padding), **kwargs)
+        return self.click(self._random_point_in_box(self._resolve_box(box), padding), **kwargs)
 
     def click_grid(
         self,
@@ -531,7 +535,7 @@ class ScreenBot:
         **click_kwargs: Any,
     ) -> list["ScreenBot.Point"]:
         """Click each grid cell once, in random order, near its center."""
-        area = self._box(box)
+        area = self._resolve_box(box)
         column_count = self._positive_integer(columns, "columns")
         row_count = self._positive_integer(rows, "rows")
         radius = self._integer_non_negative(variation, "variation")
@@ -575,7 +579,7 @@ class ScreenBot:
         button: str = "left",
         duration: Optional[float] = None,
     ) -> "ScreenBot.Point":
-        target = self._point(point)
+        target = self._resolve_point(point)
         if self.is_human_like:
             self._pause(self.human_pause)
             self._backend.mouseDown(button=button)
@@ -900,7 +904,7 @@ class ScreenBot:
 
     def save_point(self, name: str, point: Any) -> "ScreenBot.Point":
         points = self._load_points()
-        value = self._point(point)
+        value = self._resolve_point(point)
         points[name] = value
         self.coordinate_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {key: item.as_tuple() for key, item in sorted(points.items())}
@@ -928,19 +932,21 @@ class ScreenBot:
         return self.click(self.get_point(name), **kwargs)
 
     def save_position_file(self, path: str | Path, point: Any) -> "ScreenBot.Point":
-        """Save one position as a standalone JSON file."""
-        value = self._point(point)
-        self._write_coordinate_file(path, {"x": value.x, "y": value.y})
+        """Save this system's position in a portable JSON file."""
+        value = self._resolve_point(point)
+        self._save_system_coordinate(
+            path, "position", {"x": value.x, "y": value.y}
+        )
         return value
 
     def load_position_file(self, path: str | Path) -> "ScreenBot.Point":
         """Load a position previously saved with :meth:`save_position_file`."""
-        return self._point_from_file(path)
+        return self._point_from_file(path, self.system_id)
 
     def save_box_file(self, path: str | Path, box: Any) -> "ScreenBot.Box":
-        """Save one box as a standalone JSON file."""
-        value = self._box(box)
-        self._write_coordinate_file(path, {
+        """Save this system's box in a portable JSON file."""
+        value = self._resolve_box(box)
+        self._save_system_coordinate(path, "box", {
             "left": value.left,
             "top": value.top,
             "right": value.right,
@@ -950,7 +956,7 @@ class ScreenBot:
 
     def load_box_file(self, path: str | Path) -> "ScreenBot.Box":
         """Load a box previously saved with :meth:`save_box_file`."""
-        return self._box_from_file(path)
+        return self._box_from_file(path, self.system_id)
 
     def countdown(self, seconds: int = 3, *, message: str = "Starting in") -> None:
         for remaining in range(max(0, int(seconds)), 0, -1):
@@ -1190,7 +1196,7 @@ class ScreenBot:
                 self._sleep(total * weight / weight_total)
 
     def _locate_once(self, path: str | Path, confidence: float, region: Any, grayscale: bool, scales: Sequence[float]) -> Optional["ScreenBot.Match"]:
-        search_region = None if region is None else self._box(region)
+        search_region = None if region is None else self._resolve_box(region)
         display_scale = self._get_display_scale()
         template = self._load_template(path)
         try:
@@ -1215,7 +1221,7 @@ class ScreenBot:
             template.close()
 
     def _locate_all_once(self, path: str | Path, confidence: float, region: Any, grayscale: bool, scales: Sequence[float], limit: Optional[int]) -> list["ScreenBot.Match"]:
-        search_region = None if region is None else self._box(region)
+        search_region = None if region is None else self._resolve_box(region)
         display_scale = self._get_display_scale()
         template = self._load_template(path)
         results = []
@@ -1331,11 +1337,92 @@ class ScreenBot:
             raise ValueError(f"Coordinate file must contain a JSON object: {self.coordinate_file}")
         return {str(name): self._point(value) for name, value in raw.items()}
 
-    @staticmethod
-    def _write_coordinate_file(path: str | Path, payload: dict[str, int]) -> None:
+    def _resolve_point(self, value: Any) -> "ScreenBot.Point":
+        if isinstance(value, (str, Path)):
+            return self._point_from_file(value, self.system_id)
+        return self._point(value)
+
+    def _resolve_box(self, value: Any) -> "ScreenBot.Box":
+        if isinstance(value, (str, Path)):
+            return self._box_from_file(value, self.system_id)
+        return self._box(value)
+
+    def _save_system_coordinate(
+        self, path: str | Path, coordinate_type: str, value: dict[str, int]
+    ) -> None:
         output = Path(path)
+        systems: dict[str, Any] = {}
+        if output.exists():
+            raw = self._read_coordinate_file(output)
+            if self._is_portable_coordinate(raw):
+                if raw["type"] != coordinate_type:
+                    raise ValueError(
+                        f"Cannot save a {coordinate_type} in {raw['type']} file: {output}"
+                    )
+                systems.update(raw["systems"])
+            elif self._is_legacy_coordinate(raw, coordinate_type):
+                systems[self.system_id] = raw
+            else:
+                raise ValueError(f"Invalid {coordinate_type} file: {output}")
+        systems[self.system_id] = value
+        payload = {"type": coordinate_type, "systems": systems}
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    @classmethod
+    def _resolve_system_id(cls, explicit: Optional[str] = None) -> str:
+        configured = explicit or os.environ.get(cls.SYSTEM_ID_ENV)
+        if configured:
+            return cls._validate_system_id(configured)
+
+        config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        path = config_home / "screenbot" / "system-id"
+        if path.exists():
+            return cls._validate_system_id(path.read_text(encoding="utf-8").strip())
+
+        generated = str(uuid.uuid4())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(generated + "\n", encoding="utf-8")
+        return generated
+
+    @staticmethod
+    def _validate_system_id(value: str) -> str:
+        normalized = str(value).strip()
+        if not normalized or any(character.isspace() for character in normalized):
+            raise ValueError("ScreenBot system ID must be a non-empty value without spaces")
+        return normalized
+
+    @staticmethod
+    def _is_portable_coordinate(raw: Any) -> bool:
+        return (
+            isinstance(raw, dict)
+            and raw.get("type") in {"position", "box"}
+            and isinstance(raw.get("systems"), dict)
+        )
+
+    @staticmethod
+    def _is_legacy_coordinate(raw: Any, coordinate_type: str) -> bool:
+        fields = {"x", "y"} if coordinate_type == "position" else {
+            "left", "top", "right", "bottom"
+        }
+        return isinstance(raw, dict) and set(raw) == fields
+
+    @classmethod
+    def _coordinate_for_system(
+        cls, raw: Any, path: Path, coordinate_type: str, system_id: Optional[str]
+    ) -> Any:
+        if cls._is_legacy_coordinate(raw, coordinate_type):
+            return raw
+        if not cls._is_portable_coordinate(raw) or raw["type"] != coordinate_type:
+            raise ValueError(f"Invalid {coordinate_type} file: {path}")
+        current_id = system_id or cls._resolve_system_id()
+        try:
+            return raw["systems"][current_id]
+        except KeyError as error:
+            raise ValueError(
+                f"No {coordinate_type} saved for this system ({current_id}) in {path}; "
+                "run the corresponding screenbot command with --save on this system"
+            ) from error
 
     @staticmethod
     def _color_counts(image: Image.Image) -> list["ScreenBot.ColorCount"]:
@@ -1412,9 +1499,13 @@ class ScreenBot:
             ) from exc
 
     @classmethod
-    def _point_from_file(cls, path: str | Path) -> "ScreenBot.Point":
+    def _point_from_file(
+        cls, path: str | Path, system_id: Optional[str] = None
+    ) -> "ScreenBot.Point":
         source = Path(path)
-        raw = cls._read_coordinate_file(source)
+        raw = cls._coordinate_for_system(
+            cls._read_coordinate_file(source), source, "position", system_id
+        )
         if not isinstance(raw, dict) or set(raw) != {"x", "y"}:
             raise ValueError(f"Position file must contain numeric 'x' and 'y' fields: {source}")
         try:
@@ -1437,9 +1528,13 @@ class ScreenBot:
         return cls.Box(top_left, top_right, bottom_right, bottom_left)
 
     @classmethod
-    def _box_from_file(cls, path: str | Path) -> "ScreenBot.Box":
+    def _box_from_file(
+        cls, path: str | Path, system_id: Optional[str] = None
+    ) -> "ScreenBot.Box":
         source = Path(path)
-        raw = cls._read_coordinate_file(source)
+        raw = cls._coordinate_for_system(
+            cls._read_coordinate_file(source), source, "box", system_id
+        )
         fields = {"left", "top", "right", "bottom"}
         if not isinstance(raw, dict) or set(raw) != fields:
             raise ValueError(

@@ -49,14 +49,13 @@ screenbot mouse --json
 ```
 
 Save each captured position as a reusable position file while also printing it.
-Each new `0` press replaces the file with the latest position:
+Each new `0` press updates this system's entry with the latest position:
 
 ```bash
-screenbot mouse --save login-button.mouse.json
+screenbot mouse --save login-button.json
 ```
 
-The file contains `{"x": ..., "y": ...}` and can be passed directly to library
-methods that accept a point.
+The file can be passed directly to library methods that accept a point.
 
 ### Boxes
 
@@ -66,11 +65,30 @@ smallest axis-aligned rectangle containing the four marked positions is returned
 ```bash
 screenbot box
 screenbot box --json
-screenbot box --save toolbar.box.json
+screenbot box --save toolbar.json
 ```
 
-The four positions can be marked in any order. A saved file contains `left`, `top`,
-`right`, and `bottom`.
+The four positions can be marked in any order.
+
+### Portable coordinate files
+
+Position and box files store coordinates by ScreenBot system ID. Saving an existing
+file updates only the current system, so the same JSON file can be committed and
+used across machines after it has been captured once on each machine:
+
+```json
+{
+  "type": "position",
+  "systems": {
+    "c7af2f64-250f-4982-a2cb-12d0aa19c02a": {"x": 842, "y": 517}
+  }
+}
+```
+
+ScreenBot creates a random, non-sensitive ID on first use and stores it at
+`~/.config/screenbot/system-id` (or under `XDG_CONFIG_HOME`). View it with
+`screenbot system`. Set `SCREENBOT_SYSTEM_ID` to override it in containers or
+managed environments. Existing flat coordinate files remain readable.
 
 ### Pixel colors
 
@@ -101,7 +119,7 @@ box, or passing coordinates explicitly:
 
 ```bash
 screenbot colors --limit 20
-screenbot colors --box-file toolbar.box.json --limit 20
+screenbot colors --box-file toolbar.json --limit 20
 screenbot colors --box 0 0 500 300 --limit 20
 ```
 
@@ -109,7 +127,7 @@ To emit every pixel instead of aggregated counts, use `--pixels`. Rows are in
 top-to-bottom, left-to-right order and include screen coordinates:
 
 ```bash
-screenbot colors --box-file toolbar.box.json --pixels
+screenbot colors --box-file toolbar.json --pixels
 screenbot colors --box 0 0 10 10 --pixels --json
 ```
 
@@ -126,9 +144,9 @@ bot = ScreenBot()
 
 point = bot.mouse_position()
 print(point.x, point.y)
-bot.save_position_file("button.mouse.json", point)
+bot.save_position_file("button.json", point)
 
-box = bot.load_box_file("toolbar.box.json")
+box = bot.load_box_file("toolbar.json")
 print(box.left, box.top, box.right, box.bottom)
 
 print(bot.pixel_color())
@@ -139,8 +157,8 @@ for item in bot.colors_in_box(box)[:10]:
 Position and box files can be used anywhere the respective value is accepted:
 
 ```python
-bot.click("button.mouse.json")
-bot.save_screenshot("toolbar.png", "toolbar.box.json")
+bot.click("button.json")
+bot.save_screenshot("toolbar.png", "toolbar.json")
 ```
 
 Image colors are also available without using the screen:

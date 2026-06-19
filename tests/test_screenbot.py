@@ -162,6 +162,16 @@ class ScreenBotTests(unittest.TestCase):
         self.assertEqual(bot.capture_position_on_key.call_count, 3)
 
     @patch("screenbot_cli.ScreenBot")
+    def test_system_cli_prints_system_id(self, bot_type):
+        bot_type.return_value.system_id = "workstation-a"
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(main(["system"]), 0)
+
+        self.assertEqual(output.getvalue(), "workstation-a\n")
+
+    @patch("screenbot_cli.ScreenBot")
     def test_pixel_cli_waits_for_zero_capture_without_explicit_coordinates(self, bot_type):
         bot = bot_type.return_value
         point = ScreenBot.Point(12, 34)
