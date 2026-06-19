@@ -1,7 +1,7 @@
 import io
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -105,6 +105,57 @@ class ScreenBotTests(unittest.TestCase):
             box = self.bot.capture_box_on_key(announce=False)
 
         self.assertEqual(box.as_region_tuple(), (2, 1, 8, 8))
+
+    def test_capture_position_samples_pointer_on_zero_key_press(self):
+        class FakeListener:
+            def __init__(self, *, on_press):
+                self.on_press = on_press
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def join(self):
+                self.on_press(SimpleNamespace(char="x"))
+                self.on_press(SimpleNamespace(char="0"))
+
+        with patch("screenbot.keyboard.Listener", FakeListener):
+            point = self.bot.capture_position_on_key(announce=False)
+
+        self.assertEqual(point.as_tuple(), (12, 34))
+
+    @patch("screenbot_cli.ScreenBot")
+    def test_mouse_cli_prints_each_zero_captured_position(self, bot_type):
+        bot = bot_type.return_value
+        bot.capture_position_on_key.side_effect = [
+            ScreenBot.Point(12, 34),
+            ScreenBot.Point(56, 78),
+            KeyboardInterrupt,
+        ]
+        output = io.StringIO()
+
+        with redirect_stdout(output), redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["mouse"]), 0)
+
+        self.assertEqual(output.getvalue(), "12 34\n56 78\n")
+        self.assertEqual(bot.capture_position_on_key.call_count, 3)
+
+    @patch("screenbot_cli.ScreenBot")
+    def test_pixel_cli_waits_for_zero_capture_without_explicit_coordinates(self, bot_type):
+        bot = bot_type.return_value
+        point = ScreenBot.Point(12, 34)
+        bot.capture_position_on_key.return_value = point
+        bot.pixel_color.return_value = (10, 20, 30)
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(main(["pixel"]), 0)
+
+        bot.capture_position_on_key.assert_called_once_with()
+        bot.pixel_color.assert_called_once_with(point)
+        self.assertEqual(output.getvalue(), "#0A141E 10 20 30\n")
 
     def test_image_color_cli(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -37,7 +37,8 @@ command substitution.
 
 ### Mouse positions
 
-Print the current mouse coordinate:
+Move the pointer and press `0` to print its coordinate. Keep pressing `0` to
+print more positions; press Ctrl+C to stop:
 
 ```bash
 screenbot mouse
@@ -47,7 +48,8 @@ screenbot mouse --json
 # {"x":842,"y":517}
 ```
 
-Save it as a reusable position file while also printing it:
+Save each captured position as a reusable position file while also printing it.
+Each new `0` press replaces the file with the latest position:
 
 ```bash
 screenbot mouse --save login-button.mouse.json
@@ -72,7 +74,8 @@ The four positions can be marked in any order. A saved file contains `left`, `to
 
 ### Pixel colors
 
-Inspect the pixel under the mouse or a specific coordinate:
+Inspect the pixel under the mouse by moving the pointer and pressing `0`, or use
+a specific coordinate:
 
 ```bash
 screenbot pixel

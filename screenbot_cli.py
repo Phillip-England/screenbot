@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version="%(prog)s 0.2.0")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    mouse = commands.add_parser("mouse", help="print or save the current mouse position")
+    mouse = commands.add_parser("mouse", help="print positions each time 0 is pressed")
     mouse.add_argument("--save", type=Path, metavar="FILE", help="save as a position JSON file")
     mouse.add_argument("--json", action="store_true", help="print compact JSON")
 
@@ -90,10 +90,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     bot = ScreenBot()
 
     if args.command == "mouse":
-        point = bot.mouse_position()
-        if args.save:
-            bot.save_position_file(args.save, point)
-        _print_json(_point_dict(point)) if args.json else print(f"{point.x} {point.y}")
+        print(
+            "Move the pointer and press 0 to print its position. Press Ctrl+C to stop.",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            while True:
+                point = bot.capture_position_on_key(announce=False)
+                if args.save:
+                    bot.save_position_file(args.save, point)
+                _print_json(_point_dict(point)) if args.json else print(
+                    f"{point.x} {point.y}", flush=True
+                )
+        except KeyboardInterrupt:
+            pass
         return 0
 
     if args.command == "box":
@@ -107,7 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "pixel":
-        point = bot.mouse_position() if args.at is None else bot.Point(*args.at)
+        point = bot.capture_position_on_key() if args.at is None else bot.Point(*args.at)
         color = bot.pixel_color(point)
         data = {**_point_dict(point), "rgb": list(color), "hex": "#" + "".join(f"{c:02X}" for c in color)}
         _print_json(data) if args.json else print(

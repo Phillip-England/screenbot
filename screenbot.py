@@ -959,16 +959,36 @@ class ScreenBot:
         self._sleep(duration)
         return duration
 
-    def print_pos_on_click(self) -> None:
-        """Print every left-click position until interrupted with Ctrl+C."""
-        print("Click anywhere to print its position. Press Ctrl+C to stop.")
+    def capture_position_on_key(self, *, announce: bool = True) -> "ScreenBot.Point":
+        """Return the pointer position when 0 is pressed."""
+        points: list[ScreenBot.Point] = []
+        if announce:
+            print(
+                "Move the pointer and press 0 to capture its position.",
+                file=sys.stderr,
+                flush=True,
+            )
 
-        def on_click(x: int, y: int, button: Any, pressed: bool) -> None:
-            if pressed and button == mouse.Button.left:
-                print(f"({int(x)}, {int(y)})", flush=True)
+        def on_press(key: Any) -> Optional[bool]:
+            if getattr(key, "char", None) != "0":
+                return None
+            points.append(self.mouse_position())
+            return False
 
-        with mouse.Listener(on_click=on_click) as listener:
+        with keyboard.Listener(on_press=on_press) as listener:
             listener.join()
+        return points[0]
+
+    def print_pos_on_key(self) -> None:
+        """Print positions marked with 0 until interrupted with Ctrl+C."""
+        print("Move the pointer and press 0 to print its position. Press Ctrl+C to stop.")
+        while True:
+            point = self.capture_position_on_key(announce=False)
+            print(f"({point.x}, {point.y})", flush=True)
+
+    def print_pos_on_click(self) -> None:
+        """Compatibility alias for :meth:`print_pos_on_key`."""
+        self.print_pos_on_key()
 
     def capture_box_on_key(self, *, announce: bool = True) -> "ScreenBot.Box":
         """Return the bounding box of four pointer positions marked with 0."""
