@@ -807,6 +807,11 @@ class ScreenBot:
         self.hotkey(*keys)
         return keys
 
+    def websearch(self) -> tuple[str, str]:
+        """Focus the address/search bar in the active browser window."""
+        keys = ("command" if sys.platform == "darwin" else "ctrl", "l")
+        return self.hotkey(*keys)
+
     def maximize(self) -> tuple[str, ...]:
         """Maximize the active window using the current platform's shortcut."""
         if sys.platform == "darwin":

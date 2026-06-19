@@ -184,6 +184,7 @@ bot.scroll(-5)
 
 bot.maximize()  # active window
 bot.minimize()  # active window
+bot.websearch()  # focus the active browser's address/search bar
 
 bot.write("hello")
 bot.press("enter")

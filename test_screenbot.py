@@ -106,6 +106,22 @@ class WindowAndClickTests(unittest.TestCase):
             [call.hotkey("alt", "f10"), call.hotkey("alt", "f9")],
         )
 
+    def test_websearch_uses_macos_shortcut(self) -> None:
+        bot = ScreenBot(backend=Mock())
+
+        with patch("screenbot.sys.platform", "darwin"):
+            self.assertEqual(bot.websearch(), ("command", "l"))
+
+        bot._backend.hotkey.assert_called_once_with("command", "l")
+
+    def test_websearch_uses_control_shortcut_on_other_platforms(self) -> None:
+        bot = ScreenBot(backend=Mock())
+
+        with patch("screenbot.sys.platform", "linux"):
+            self.assertEqual(bot.websearch(), ("ctrl", "l"))
+
+        bot._backend.hotkey.assert_called_once_with("ctrl", "l")
+
 
 class KillSequenceTests(unittest.TestCase):
     @patch("screenbot.os.kill")
