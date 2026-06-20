@@ -286,6 +286,7 @@ class ScreenBot:
         scales: Sequence[float] = (1.0,),
         coordinate_file: str | Path = "screenbot_coords.json",
         seed: Optional[int] = None,
+        wait_time: float | tuple[float, float] = 0.0,
         failsafe: bool = True,
         kill_sequence: Optional[str] = None,
         backend: Any = None,
@@ -315,6 +316,12 @@ class ScreenBot:
         self._random = random.Random(seed)
         self._state = self._normalize_state(state)
         self.wait_time = (0.0, 0.0)
+        if isinstance(wait_time, tuple):
+            if len(wait_time) != 2:
+                raise ValueError("wait_time must be a number or a 2-item range")
+            self.set_wait_time(*wait_time)
+        else:
+            self.set_wait_time(wait_time)
         self._action_depth = 0
         self.kill_sequence: Optional[str] = None
         self._kill_buffer = ""
@@ -592,6 +599,31 @@ class ScreenBot:
         return self.move_to(self.screen_center(), duration=duration)
 
     @_action
+    def move_to_random(
+        self,
+        *,
+        duration: Optional[float | tuple[float, float]] = None,
+        padding: int = 1,
+    ) -> "ScreenBot.Point":
+        """Move to a random on-screen point over an exact or random duration."""
+        edge = self._integer_non_negative(padding, "padding")
+        width, height = self.screen_size()
+        if width <= edge * 2 or height <= edge * 2:
+            raise ValueError("padding leaves no available points on the screen")
+
+        target = self.Point(
+            self._random.randint(edge, width - edge - 1),
+            self._random.randint(edge, height - edge - 1),
+        )
+        if isinstance(duration, tuple):
+            move_duration = self._random.uniform(*self._range(duration, "duration"))
+        elif duration is None:
+            move_duration = None
+        else:
+            move_duration = self._non_negative(duration, "duration")
+        return self.move_to(target, duration=move_duration)
+
+    @_action
     def move_mouse_up(
         self,
         distance: int,
@@ -664,9 +696,9 @@ class ScreenBot:
             return target
         if self.is_human_like:
             for index in range(self._positive_integer(clicks, "clicks")):
-                self._backend.mouseDown(button=button)
+                self._backend.mouseDown(x=target.x, y=target.y, button=button)
                 self._pause(self.human_click_dwell)
-                self._backend.mouseUp(button=button)
+                self._backend.mouseUp(x=target.x, y=target.y, button=button)
                 if index + 1 < clicks:
                     self._sleep(self._human_interval(interval, self.human_click_dwell))
             self._pause(self.human_pause, factor=0.5)
@@ -1121,9 +1153,10 @@ class ScreenBot:
         use_random = self.is_human_like if random_point is None else random_point
         if use_random:
             pad = self.human_image_padding if padding is None else padding
-            target = self._random_point_in_box(match.box, pad)
+            target = self._random_point_in_image(match.box, pad)
         else:
             target = match.center
+        click_kwargs.setdefault("jitter", 0)
         self.click(target, **click_kwargs)
         return match
 
@@ -1176,7 +1209,7 @@ class ScreenBot:
         button: str = "left",
         **click_kwargs: Any,
     ) -> Optional["ScreenBot.Match"]:
-        """Wait for an image, then click near its center without leaving it."""
+        """Wait for an image, then click it, using its full area in human-like mode."""
         radius = self._integer_non_negative(variation, "variation")
         match = self.wait_for(
             image_path,
@@ -1191,7 +1224,11 @@ class ScreenBot:
         if match is None:
             return None
 
-        target = self._point_near_center(match.box, radius)
+        target = (
+            self._random_point_in_image(match.box, self.human_image_padding)
+            if self.is_human_like
+            else self._point_near_center(match.box, radius)
+        )
         click_kwargs.setdefault("jitter", 0)
         self.click(target, button=button, **click_kwargs)
         return match
@@ -1212,7 +1249,7 @@ class ScreenBot:
         variation: int = 5,
         **click_kwargs: Any,
     ) -> list["ScreenBot.Point"]:
-        """Click every visible match in random order near each match's center."""
+        """Click every visible match, using each full area in human-like mode."""
         radius = self._integer_non_negative(variation, "variation")
         matches = self.locate_all(
             image_path,
@@ -1228,7 +1265,11 @@ class ScreenBot:
         click_kwargs.setdefault("jitter", 0)
         clicked = []
         for match in matches:
-            target = self._point_near_center(match.box, radius)
+            target = (
+                self._random_point_in_image(match.box, self.human_image_padding)
+                if self.is_human_like
+                else self._point_near_center(match.box, radius)
+            )
             clicked.append(self.click(target, **click_kwargs))
         return clicked
 
@@ -1813,6 +1854,12 @@ class ScreenBot:
         if right < left or bottom < top:
             return box.center
         return self.Point(self._random.randint(left, right), self._random.randint(top, bottom))
+
+    def _random_point_in_image(self, box: "ScreenBot.Box", padding: int) -> "ScreenBot.Point":
+        pad = self._integer_non_negative(padding, "padding")
+        if box.width <= pad * 2 or box.height <= pad * 2:
+            pad = 0
+        return self._random_point_in_box(box, pad)
 
     def _point_in_circle(self, radius: int) -> tuple[int, int]:
         while True:

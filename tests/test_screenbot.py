@@ -139,6 +139,46 @@ class ScreenBotTests(unittest.TestCase):
         self.assertEqual(bot.move_to_center(duration=0.25), ScreenBot.Point(960, 540))
         backend.moveTo.assert_called_once_with(960, 540, duration=0.25)
 
+    def test_move_to_random_uses_requested_duration_and_padding(self):
+        backend = Mock()
+        backend.size.return_value = SimpleNamespace(width=100, height=80)
+        bot = ScreenBot(backend=backend, seed=7)
+
+        target = bot.move_to_random(duration=(8, 10), padding=5)
+
+        self.assertTrue(5 <= target.x < 95)
+        self.assertTrue(5 <= target.y < 75)
+        move = backend.moveTo.call_args
+        self.assertEqual(move.args, target.as_tuple())
+        self.assertTrue(8 <= move.kwargs["duration"] <= 10)
+
+    def test_move_to_random_uses_human_path_for_full_duration(self):
+        backend = Mock()
+        backend.size.return_value = SimpleNamespace(width=100, height=80)
+        backend.position.return_value = SimpleNamespace(x=10, y=10)
+        sleeper = Mock()
+        bot = ScreenBot(
+            state=ScreenBot.HUMAN_LIKE,
+            backend=backend,
+            sleeper=sleeper,
+            seed=7,
+        )
+        bot.configure_human_like(pause=(0, 0))
+
+        target = bot.move_to_random(duration=10, padding=5)
+
+        self.assertGreater(backend.moveTo.call_count, 1)
+        self.assertEqual(backend.moveTo.call_args.args[:2], target.as_tuple())
+        self.assertAlmostEqual(sum(call.args[0] for call in sleeper.call_args_list), 10)
+
+    def test_move_to_random_rejects_padding_that_covers_screen(self):
+        backend = Mock()
+        backend.size.return_value = SimpleNamespace(width=10, height=10)
+        bot = ScreenBot(backend=backend)
+
+        with self.assertRaisesRegex(ValueError, "padding leaves no available points"):
+            bot.move_to_random(padding=5)
+
     def test_click_center_forwards_click_options(self):
         backend = Mock()
         backend.size.return_value = SimpleNamespace(width=1920, height=1080)
@@ -266,6 +306,38 @@ class ScreenBotTests(unittest.TestCase):
         bot.write("hello")
 
         self.assertEqual(sleeper.call_args_list, [unittest.mock.call(3.0)] * 2)
+
+    def test_random_wait_can_be_configured_at_construction_and_changed(self):
+        sleeper = Mock()
+        bot = ScreenBot(backend=Mock(), sleeper=sleeper, wait_time=(1, 2), seed=7)
+
+        bot.click((10, 20))
+        first_wait = sleeper.call_args.args[0]
+        self.assertGreaterEqual(first_wait, 1)
+        self.assertLessEqual(first_wait, 2)
+
+        sleeper.reset_mock()
+        bot.set_wait_time(3, 4).click((20, 30))
+        second_wait = sleeper.call_args.args[0]
+        self.assertGreaterEqual(second_wait, 3)
+        self.assertLessEqual(second_wait, 4)
+
+        sleeper.reset_mock()
+        bot.set_wait_time(0).click((30, 40))
+        sleeper.assert_not_called()
+
+    def test_constructor_wait_accepts_an_exact_duration(self):
+        sleeper = Mock()
+        bot = ScreenBot(backend=Mock(), sleeper=sleeper, wait_time=1.5)
+
+        bot.click((10, 20))
+
+        sleeper.assert_called_once_with(1.5)
+
+    def test_constructor_wait_range_is_validated(self):
+        for wait_time in ((1,), (1, 2, 3), (-1, 2), (3, 2)):
+            with self.subTest(wait_time=wait_time), self.assertRaises(ValueError):
+                ScreenBot(backend=Mock(), wait_time=wait_time)
 
     def test_random_default_wait_uses_configured_range(self):
         sleeper = Mock()

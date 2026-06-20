@@ -484,6 +484,23 @@ class ImageClickAllTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "variation"):
             bot.click_all_images("unused.png", variation=-1)
 
+    def test_human_like_clicks_across_each_image_instead_of_near_center(self) -> None:
+        backend = Mock()
+        backend.position.return_value = SimpleNamespace(x=0, y=0)
+        boxes = [SimpleNamespace(left=10, top=20, width=40, height=30)]
+        backend.locateAllOnScreen.return_value = boxes
+        bot = ScreenBot(state=ScreenBot.HUMAN_LIKE, backend=backend, sleeper=Mock(), seed=7)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "item.png"
+            Image.new("RGB", (4, 4)).save(path)
+            points = bot.click_all_images(path, variation=0)
+
+        self.assertEqual(len(points), 1)
+        self.assertTrue(13 <= points[0].x < 47)
+        self.assertTrue(23 <= points[0].y < 47)
+        self.assertNotEqual(points[0], ScreenBot.Point(30, 35))
+
 
 class ClickFirstAvailableImageTests(unittest.TestCase):
     def test_clicks_first_visible_image_in_path_order(self) -> None:
@@ -528,6 +545,25 @@ class ClickFirstAvailableImageTests(unittest.TestCase):
 
         with self.assertRaises(ScreenBot.ImageNotFound):
             bot.click_first_available_image([])
+
+    def test_human_like_randomizes_even_when_match_is_smaller_than_padding(self) -> None:
+        backend = Mock()
+        backend.position.return_value = SimpleNamespace(x=0, y=0)
+        backend.locateOnScreen.return_value = SimpleNamespace(
+            left=40, top=60, width=4, height=4
+        )
+        bot = ScreenBot(state=ScreenBot.HUMAN_LIKE, backend=backend, sleeper=Mock(), seed=7)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "small.png"
+            Image.new("RGB", (4, 4)).save(path)
+            match = bot.click_first_available_image([path])
+
+        self.assertIsNotNone(match)
+        target = backend.moveTo.call_args_list[-1].args[:2]
+        self.assertTrue(40 <= target[0] < 44)
+        self.assertTrue(60 <= target[1] < 64)
+        self.assertNotEqual(target, (42, 62))
 
 
 class WaitForAndClickTests(unittest.TestCase):
@@ -581,6 +617,27 @@ class WaitForAndClickTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "variation"):
             bot.wait_for_and_click("unused.png", variation=-1)
+
+    def test_human_like_clicks_across_image_when_variation_is_zero(self) -> None:
+        backend = Mock()
+        backend.position.return_value = SimpleNamespace(x=0, y=0)
+        backend.locateOnScreen.return_value = SimpleNamespace(
+            left=100, top=200, width=40, height=30
+        )
+        bot = ScreenBot(state=ScreenBot.HUMAN_LIKE, backend=backend, sleeper=Mock(), seed=7)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "button.png"
+            Image.new("RGB", (4, 4)).save(path)
+            match = bot.wait_for_and_click(path, variation=0)
+
+        self.assertIsNotNone(match)
+        target = backend.moveTo.call_args_list[-1].args[:2]
+        self.assertTrue(103 <= target[0] < 137)
+        self.assertTrue(203 <= target[1] < 227)
+        self.assertNotEqual(target, (120, 215))
+        backend.mouseDown.assert_called_once_with(x=target[0], y=target[1], button="left")
+        backend.mouseUp.assert_called_once_with(x=target[0], y=target[1], button="left")
 
 
 class CoordinateFileTests(unittest.TestCase):

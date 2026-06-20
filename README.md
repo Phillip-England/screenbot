@@ -173,6 +173,7 @@ bot = ScreenBot(
     scales=(1.0,),
     coordinate_file="screenbot_coords.json",
     seed=42,
+    wait_time=(1, 2),             # random delay after each input action
     failsafe=True,
     kill_sequence=None,
     log=False,
@@ -204,6 +205,7 @@ Read `bot.state` for the active state and `bot.is_human_like` for a boolean chec
 Set a delay after every top-level input action. Explicit waits do not add it:
 
 ```python
+bot = ScreenBot(wait_time=(1, 2))
 bot.set_wait_time(1)       # exactly one second
 bot.set_wait_time(1, 3)    # random inclusive range
 bot.set_wait_time(0)       # disabled
@@ -240,7 +242,10 @@ from `0` through `255`.
 
 ```python
 bot.move_to((500, 300), duration=0.2)
+bot.move_to((500, 300), duration=10)       # arrive at x, y in 10 seconds
 bot.move_to_center()
+bot.move_to_random(duration=10)            # random point, human path when enabled
+bot.move_to_random(duration=(5, 10), padding=20)
 bot.move_mouse_up(100, variation=5)
 bot.move_mouse_down(100)
 bot.move_mouse_left(100)
@@ -354,9 +359,13 @@ seed makes decisions repeatable. `run_with_chance` returns the action result or
 Human-like mode adds curved movement, timing variation, click dwell, target
 variation, paced scrolling, and optional corrected typing mistakes. It never
 changes the requested final text, key sequence, button, or final destination.
+Image-click helpers choose a random point across each matched image (inside the
+configured `image_padding`) instead of aiming near its center. Default mode
+retains center-based image clicking and explicit `variation` behavior.
 
 ```python
 bot = ScreenBot(state=ScreenBot.HUMAN_LIKE, seed=42)
+bot.move_to_random(duration=10)
 bot.configure_human_like(
     pause=(0.04, 0.16),
     move_duration=(0.22, 0.72),
